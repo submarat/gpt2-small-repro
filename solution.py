@@ -191,9 +191,34 @@ class MultiHeadAttention(nn.Module):
             'batch seq n_heads d_head, n_heads d_head d_model -> batch seq d_model'
         )
 
-        return out
+        return attn_probs, out
 
-mha = MultiHeadAttention(seq_len = 10, d_model = 16, d_head = 8, n_heads = 2, device = device)
 
-x = t.randn(1, 10, 16, device=device)
-out = mha(x)
+def test_mha():
+    batch_size, seq_len, d_model, d_head, n_heads = 2, 10, 16, 8, 2
+    mha = MultiHeadAttention(seq_len, d_model, d_head, n_heads, device)
+
+    # Test 1: Check output shapes
+    test_input = t.randn(batch_size, seq_len, d_model, device=device)
+    test_attn_probs, test_out = mha(test_input)
+
+    expected_attn_shape = (batch_size, n_heads, seq_len, seq_len)
+    expected_out_shape = (batch_size, seq_len, d_model)
+
+    assert test_attn_probs.shape == expected_attn_shape, f"Attention probs shape {test_attn_probs.shape} != expected {expected_attn_shape}"
+    assert test_out.shape == expected_out_shape, f"Output shape {test_out.shape} != expected {expected_out_shape}"
+
+    # Test 2: Check attention probabilities sum to 1
+    attn_probs_sum = test_attn_probs.sum(dim=-1)
+    assert t.allclose(attn_probs_sum, t.ones_like(attn_probs_sum)), "Attention probabilities don't sum to 1"
+
+    # Test 3: Verify causal attention mask
+    for q_pos in range(seq_len):
+        for k_pos in range(seq_len):
+            if k_pos > q_pos:  # Future positions should have 0 attention
+                assert t.allclose(test_attn_probs[..., q_pos, k_pos], t.zeros_like(test_attn_probs[..., q_pos, k_pos])), \
+                    f"Non-causal attention at position q={q_pos}, k={k_pos}"
+
+    print("All tests passed!")
+
+test_mha()
