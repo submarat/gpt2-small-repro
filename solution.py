@@ -222,3 +222,12 @@ def test_mha():
     print("All tests passed!")
 
 test_mha()
+
+# %%
+# Visualize attention probabilities
+batch_size, seq_len, d_model, d_head, n_heads = 2, 10, 16, 8, 2
+mha = MultiHeadAttention(seq_len, d_model, d_head, n_heads, device)
+
+# Test 1: Check output shapes
+test_input = t.randn(batch_size, seq_len, d_model, device=device)
+test_attn_probs, test_out = mha(test_input)
