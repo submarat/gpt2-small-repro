@@ -133,31 +133,40 @@ print(completion)
 # Self attention
 # In this section we will implement the attention head which consists of
 # Q, K, V tensors which we will multiple to obtain
+@dataclass
+class TransformerConfig:
+    seq_len: int = 64
+    d_model: int = 16
+    d_head: int = 32
+    n_heads: int = 8
+    d_mlp: int = 16
+    n_layers: int = 2
+    vocab: int = 128
+    device: str = 'cpu'
+
 class MultiHeadAttention(nn.Module):
 
-    def __init__(self, seq_len: int, d_model: int, d_head: int, n_heads: int, device):
+    def __init__(self, config: TransformerConfig):
         """
         Args:
-            - seq_len - context length
-            - d_model - residual stream dimensions
-            - d_head - dimensions in each head
-            - n_heads - number of heads per attention head
+            - config - TransformerConfig object containing hyperparameters
         """
         super().__init__()
 
-        self.seq_len = seq_len
-        self.d_head = d_head
+        self.seq_len = config.seq_len
+        self.d_head = config.d_head
+        self.device = config.device
         
-        self.causal_mask = t.triu(t.ones(seq_len, seq_len, dtype=bool, device=device), diagonal=1)
+        self.causal_mask = t.triu(t.ones(config.seq_len, config.seq_len, dtype=bool, device=config.device), diagonal=1)
 
         # Query projection matrix
-        self.W_q = nn.Parameter(t.randn(n_heads, d_model, d_head, device=device)) 
+        self.W_q = nn.Parameter(t.randn(config.n_heads, config.d_model, config.d_head, device=config.device)) 
         # Key projection matrix
-        self.W_k = nn.Parameter(t.randn(n_heads, d_model, d_head, device=device))
+        self.W_k = nn.Parameter(t.randn(config.n_heads, config.d_model, config.d_head, device=config.device))
         # Value projection matrix
-        self.W_v = nn.Parameter(t.randn(n_heads, d_model, d_head, device=device))
+        self.W_v = nn.Parameter(t.randn(config.n_heads, config.d_model, config.d_head, device=config.device))
         # Output projection matrix to obtain final values
-        self.W_o = nn.Parameter(t.randn(n_heads, d_head, d_model, device=device))
+        self.W_o = nn.Parameter(t.randn(config.n_heads, config.d_head, config.d_model, device=config.device))
 
     def forward(self, x: Float[Tensor, "batch seq d_model"]) -> Float[Tensor, "batch seq d_model"]:
         seq_len = self.seq_len
@@ -197,15 +206,15 @@ class MultiHeadAttention(nn.Module):
 
 
 def test_mha():
-    batch_size, seq_len, d_model, d_head, n_heads = 2, 10, 16, 8, 2
-    mha = MultiHeadAttention(seq_len, d_model, d_head, n_heads, device)
+    config = TransformerConfig(seq_len=10, d_model=16, d_head=8, n_heads=2, device=device)
+    mha = MultiHeadAttention(config)
 
     # Test 1: Check output shapes
-    test_input = t.randn(batch_size, seq_len, d_model, device=device)
+    test_input = t.randn(2, config.seq_len, config.d_model, device=config.device)
     test_attn_probs, test_out = mha(test_input)
 
-    expected_attn_shape = (batch_size, n_heads, seq_len, seq_len)
-    expected_out_shape = (batch_size, seq_len, d_model)
+    expected_attn_shape = (2, config.n_heads, config.seq_len, config.seq_len)
+    expected_out_shape = (2, config.seq_len, config.d_model)
 
     assert test_attn_probs.shape == expected_attn_shape, f"Attention probs shape {test_attn_probs.shape} != expected {expected_attn_shape}"
     assert test_out.shape == expected_out_shape, f"Output shape {test_out.shape} != expected {expected_out_shape}"
@@ -215,8 +224,8 @@ def test_mha():
     assert t.allclose(attn_probs_sum, t.ones_like(attn_probs_sum)), "Attention probabilities don't sum to 1"
 
     # Test 3: Verify causal attention mask
-    for q_pos in range(seq_len):
-        for k_pos in range(seq_len):
+    for q_pos in range(config.seq_len):
+        for k_pos in range(config.seq_len):
             if k_pos > q_pos:  # Future positions should have 0 attention
                 assert t.allclose(test_attn_probs[..., q_pos, k_pos], t.zeros_like(test_attn_probs[..., q_pos, k_pos])), \
                     f"Non-causal attention at position q={q_pos}, k={k_pos}"
@@ -227,15 +236,15 @@ test_mha()
 
 # %%
 # Visualize attention probabilities
-batch_size, seq_len, d_model, d_head, n_heads = 2, 10, 16, 8, 2
-mha = MultiHeadAttention(seq_len, d_model, d_head, n_heads, device)
+config = TransformerConfig(seq_len=10, d_model=16, d_head=8, n_heads=2, device=device)
+mha = MultiHeadAttention(config)
 
-test_input = t.randn(batch_size, seq_len, d_model, device=device)
+test_input = t.randn(2, config.seq_len, config.d_model, device=config.device)
 test_attn_probs, test_out = mha(test_input)
 
 plt.figure(figsize=(12, 4))
-for head in range(n_heads):
-    plt.subplot(1, n_heads, head + 1)
+for head in range(config.n_heads):
+    plt.subplot(1, config.n_heads, head + 1)
     plt.imshow(test_attn_probs[0, head].detach().cpu())
     plt.title(f'Head {head}')
     plt.colorbar()
@@ -245,14 +254,14 @@ plt.show()
 # %%
 # LayerNorm
 class LayerNorm(nn.Module):
-    def __init__(self, d_model: int, device):
+    def __init__(self, config: TransformerConfig):
         """
         Args:
-            - d_model - dimensions in resdual stream
+            - config - TransformerConfig object containing model configuration
         """
         super().__init__()
-        self.scale = nn.Parameter(t.ones(d_model, device=device))
-        self.shift = nn.Parameter(t.zeros(d_model, device=device))
+        self.scale = nn.Parameter(t.ones(config.d_model, device=config.device))
+        self.shift = nn.Parameter(t.zeros(config.d_model, device=config.device))
         self.eps = 1e-5
 
     def forward(self, x: Float[Tensor, 'batch seq d_model']) -> Float[Tensor, 'batch seq d_model']:
@@ -268,17 +277,18 @@ class LayerNorm(nn.Module):
 
 
 def test_layer_norm():
-    batch, seq_len, d_model = 2, 3, 5
-    ln = LayerNorm(d_model, device)
+    batch, seq_len = 2, 3
+    config = TransformerConfig(d_model=5, device=device)
+    ln = LayerNorm(config)
 
-    test_input = t.randn(batch, seq_len, d_model, device=device)
+    test_input = t.randn(batch, seq_len, config.d_model, device=config.device)
     test_output = ln(test_input)
 
-    # Confirm that input and ouput shape match
+    # Confirm that input and output shape match
     assert test_input.shape == test_output.shape
 
     # Compare to torch LayerNorm implementation
-    torch_ln = nn.LayerNorm(d_model, device=device)
+    torch_ln = nn.LayerNorm(config.d_model, device=config.device)
     torch_ln.weights = ln.scale
     torch_ln.bias = ln.shift
 
@@ -293,20 +303,21 @@ test_layer_norm()
 # MLP layer
 class MLP(nn.Module):
 
-    def __init__(self, d_model: int, d_mlp: int, device):
+    def __init__(self, config):
         super().__init__()
-        self.l1 = nn.Linear(d_model, d_mlp, device=device)
+        self.l1 = nn.Linear(config.d_model, config.d_mlp, device=device)
         self.gelu = nn.GELU()
-        self.l2 = nn.Linear(d_mlp, d_model, device=device)
+        self.l2 = nn.Linear(config.d_mlp, config.d_model, device=device)
     
     def forward(self, x: Float[Tensor, 'batch seq d_model']) -> Float[Tensor, 'batch seq d_model']:
         return self.l2(self.gelu(self.l1(x)))
 
 def test_mlp():
-    batch, seq, d_model, d_mlp = 2, 10, 8, 32
+    config = TransformerConfig(seq_len=10, d_model=8, d_mlp=32, device=device)
+    batch = 2
 
-    mlp = MLP(d_model, d_mlp, device)
-    test_input = t.randn(batch, seq, d_model, device=device)
+    mlp = MLP(config)
+    test_input = t.randn(batch, config.seq_len, config.d_model, device=config.device)
     test_output = mlp(test_input)
 
     # Input/output both come from and return to residual stream
@@ -328,12 +339,12 @@ class TransformerBlock(nn.Module):
     It presents a single layer in Transfomer decoder which is
     repeated several times.
     """
-    def __init__(self, seq_len, d_model, d_mlp, d_head, n_heads, device):
+    def __init__(self, config: TransformerConfig):
         super().__init__()
-        self.ln1 = LayerNorm(d_model, device=device)
-        self.mha = MultiHeadAttention(seq_len, d_model, d_head, n_heads, device=device)
-        self.ln2 = LayerNorm(d_model, device=device)
-        self.mlp = MLP(d_model, d_mlp, device=device)
+        self.ln1 = LayerNorm(config)
+        self.mha = MultiHeadAttention(config)
+        self.ln2 = LayerNorm(config)
+        self.mlp = MLP(config)
     
     def forward(self, x: Float[Tensor, 'batch seq_len d_model']) -> Float[Tensor, 'batch seq_len d_model']:
         x_norm = self.ln1(x)
@@ -345,15 +356,10 @@ class TransformerBlock(nn.Module):
         return x2
 
 def test_transformer_block():
-    batch = 2
-    seq_len = 10
-    d_model = 8
-    d_head = 4
-    n_heads = 2
-    d_mlp = 32
+    config = TransformerConfig(seq_len=10, d_model=8, d_head=4, n_heads=2, d_mlp = 32, device=device)
 
-    block = TransformerBlock(seq_len, d_model, d_mlp, d_head, n_heads, device)
-    test_input = t.randn(batch, seq_len, d_model, device=device)
+    block = TransformerBlock(config)
+    test_input = t.randn(2, config.seq_len, config.d_model, device=config.device)
     test_output = block(test_input)
 
     # Check shapes match
@@ -374,27 +380,25 @@ class Embedding(nn.Module):
     Embedding is simply a linear projection of the input sequence
     after tokenization.
     """
-    def __init__(self, vocab: int, d_model: int, device):
+    def __init__(self, config: TransformerConfig):
         super().__init__()
-        self.embed = nn.Parameter(t.randn(vocab, d_model, device=device))
+        self.embed = nn.Parameter(t.randn(config.vocab, config.d_model, device=config.device))
 
     def forward(self, x: Int[Tensor, 'batch seq_len']) -> Float[Tensor, 'batch seq_len d_model']:
         return self.embed[x]
 
 
 def test_embedding():
+    config = TransformerConfig(seq_len=10, d_model=8, vocab=1000, device=device)
     batch = 2
-    seq_len = 10
-    vocab_size = 1000
-    d_model = 8
 
-    embedding = Embedding(vocab_size, d_model, device)
-    # Create random token indices between 0 and vocab_size-1
-    test_input = t.randint(0, vocab_size, (batch, seq_len), device=device)
+    embedding = Embedding(config)
+    # Create random token indices between 0 and config.vocab-1
+    test_input = t.randint(0, config.vocab, (batch, config.seq_len), device=config.device)
     test_output = embedding(test_input)
 
     # Check output shape is correct
-    expected_shape = (batch, seq_len, d_model)
+    expected_shape = (batch, config.seq_len, config.d_model)
     assert test_output.shape == expected_shape, f"Expected shape {expected_shape}, got {test_output.shape}"
 
     # Check output type is float
@@ -415,10 +419,10 @@ test_embedding()
 
 # %%
 class PositionalEmbedding(nn.Module):
-    def __init__(self, seq_len: int, d_model: int, device):
+    def __init__(self, config: TransformerConfig):
         super().__init__()
         self.positional_embedding = nn.Parameter(
-            t.empty((seq_len, d_model), device=device)
+            t.empty((config.seq_len, config.d_model), device=config.device)
         )
         nn.init.normal_(self.positional_embedding)
     
@@ -436,11 +440,11 @@ class Unembedding(nn.Module):
     returning logits over the entire vocabulary that can be used
     for sampling autoregressively.
     """
-    def __init__(self, d_model: int, vocab: int, device):
+    def __init__(self, config: TransformerConfig):
         super().__init__()
-        self.w_u = nn.Parameter(t.empty((d_model, vocab), device=device))
+        self.w_u = nn.Parameter(t.empty((config.d_model, config.vocab), device=config.device))
         nn.init.normal_(self.w_u)
-        self.b_u = nn.Parameter(t.zeros((vocab,), device=device, requires_grad=False))
+        self.b_u = nn.Parameter(t.zeros((config.vocab,), device=config.device, requires_grad=False))
     
     def forward(self, x: Float[Tensor, 'batch seq d_model']) -> Float[Tensor, 'batch seq vocab']:
         """
@@ -450,22 +454,20 @@ class Unembedding(nn.Module):
         return einops.einsum(x, self.w_u, 'batch seq d_model, d_model vocab -> batch seq vocab') + self.b_u
         
 def test_unembedding():
-    d_model = 768
-    vocab_size = 50257
+    config = TransformerConfig(d_model=768, vocab=50257, seq_len=3, device=device)
     batch_size = 2
-    seq_len = 3
 
     # Create a random input tensor
-    test_input = t.randn((batch_size, seq_len, d_model), device=device)
+    test_input = t.randn((batch_size, config.seq_len, config.d_model), device=config.device)
 
     # Initialize the Unembedding module
-    unembedding = Unembedding(d_model, vocab_size, device)
+    unembedding = Unembedding(config)
 
     # Run the forward pass
     test_output = unembedding(test_input)
 
     # Check the shape of the output
-    assert test_output.shape == (batch_size, seq_len, vocab_size), "Output shape is incorrect"
+    assert test_output.shape == (batch_size, config.seq_len, config.vocab), "Output shape is incorrect"
 
     # Check for infinities and NaN
     assert not t.isnan(test_output).any(), "Output contains NaN values"
@@ -475,15 +477,60 @@ def test_unembedding():
 
 test_unembedding()
 
+# %%
+class Transformer(nn.Module):
+    """
+    Transformer is a stack of TransformerBlocks.
+    """
+    def __init__(self, config: TransformerConfig):
+        super().__init__()
+        self.embed = Embedding(config)
+        self.pos_embed = PositionalEmbedding(config)
 
+        self.blocks = nn.Sequential(*[TransformerBlock(config) for _ in range(config.n_layers)])
 
-
-
-
-
-        
-
-
-
+        self.layer_norm = LayerNorm(config)
+        self.unembed = Unembedding(config)
     
+    def forward(self, tokens: Int[Tensor, 'batch seq']) -> Float[Tensor, 'batch seq vocab']:
+        x_embed = self.embed(tokens)
+        x_pos = self.pos_embed(tokens)
+        x = x_embed + x_pos
 
+        x = self.blocks(x)
+        x_norm = self.layer_norm(x)
+        logits = self.unembed(x_norm)
+        return logits
+
+# Question: where is the autoregressive bit that's used for training?
+# Answer: given a list of tokens we'll get back a bunch of distributions (as logits) over all tokens
+# You could sample autoregressively from Transformer at this point
+# The loss function is the thing that takes a sequence of tokens and compares the response
+# i.e. given tokens[:-1] compare predicted distribution with the true labels
+# tokens[1:]
+
+def test_transformer():
+    batch=2
+
+    config = TransformerConfig(
+        seq_len=10,
+        d_model=5,
+        d_head=8,
+        n_heads=4,
+        d_mlp=20,
+        n_layers=2,
+        vocab=100,
+        device=device
+    )
+
+    transformer = Transformer(config)
+    test_input = t.randint(size=(batch, config.seq_len), high=config.vocab)
+
+    test_output = transformer(test_input)
+    assert test_output.shape == (batch, config.seq_len, config.vocab)
+    assert test_output.dtype == t.float
+
+    print("All tests passed!")
+
+test_transformer()
+# %%
