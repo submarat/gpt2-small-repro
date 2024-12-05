@@ -13,6 +13,8 @@ import numpy as np
 import torch as t
 import torch.nn as nn
 import wandb
+import matplotlib.pyplot as plt
+
 from IPython.display import display
 from jaxtyping import Float, Int
 from rich import print as rprint
@@ -228,6 +230,260 @@ test_mha()
 batch_size, seq_len, d_model, d_head, n_heads = 2, 10, 16, 8, 2
 mha = MultiHeadAttention(seq_len, d_model, d_head, n_heads, device)
 
-# Test 1: Check output shapes
 test_input = t.randn(batch_size, seq_len, d_model, device=device)
 test_attn_probs, test_out = mha(test_input)
+
+plt.figure(figsize=(12, 4))
+for head in range(n_heads):
+    plt.subplot(1, n_heads, head + 1)
+    plt.imshow(test_attn_probs[0, head].detach().cpu())
+    plt.title(f'Head {head}')
+    plt.colorbar()
+plt.tight_layout()
+plt.show()
+
+# %%
+# LayerNorm
+class LayerNorm(nn.Module):
+    def __init__(self, d_model: int, device):
+        """
+        Args:
+            - d_model - dimensions in resdual stream
+        """
+        super().__init__()
+        self.scale = nn.Parameter(t.ones(d_model, device=device))
+        self.shift = nn.Parameter(t.zeros(d_model, device=device))
+        self.eps = 1e-5
+
+    def forward(self, x: Float[Tensor, 'batch seq d_model']) -> Float[Tensor, 'batch seq d_model']:
+        # Normalize to mean 0, variance 1
+        means = x.mean(dim=(-1), keepdim=True)
+        variances = x.var(dim=(-1), keepdim=True, unbiased=False)
+        x = (x - means)/(variances + self.eps)**0.5
+        
+        # Scale and translate
+        x = x * self.scale
+        x = x + self.shift
+        return x
+
+
+def test_layer_norm():
+    batch, seq_len, d_model = 2, 3, 5
+    ln = LayerNorm(d_model, device)
+
+    test_input = t.randn(batch, seq_len, d_model, device=device)
+    test_output = ln(test_input)
+
+    # Confirm that input and ouput shape match
+    assert test_input.shape == test_output.shape
+
+    # Compare to torch LayerNorm implementation
+    torch_ln = nn.LayerNorm(d_model, device=device)
+    torch_ln.weights = ln.scale
+    torch_ln.bias = ln.shift
+
+    expected_output = torch_ln(test_input)
+    assert t.allclose(expected_output.cpu(), test_output.cpu())
+
+    print('All tests pass!')
+
+test_layer_norm()
+
+# %%
+# MLP layer
+class MLP(nn.Module):
+
+    def __init__(self, d_model: int, d_mlp: int, device):
+        super().__init__()
+        self.l1 = nn.Linear(d_model, d_mlp, device=device)
+        self.gelu = nn.GELU()
+        self.l2 = nn.Linear(d_mlp, d_model, device=device)
+    
+    def forward(self, x: Float[Tensor, 'batch seq d_model']) -> Float[Tensor, 'batch seq d_model']:
+        return self.l2(self.gelu(self.l1(x)))
+
+def test_mlp():
+    batch, seq, d_model, d_mlp = 2, 10, 8, 32
+
+    mlp = MLP(d_model, d_mlp, device)
+    test_input = t.randn(batch, seq, d_model, device=device)
+    test_output = mlp(test_input)
+
+    # Input/output both come from and return to residual stream
+    assert test_input.shape == test_output.shape
+
+    # Check for infinities and NaN
+    assert not t.isnan(test_output).any(), "Output contains NaN values"
+    assert not t.isinf(test_output).any(), "Output contains infinite values"
+
+    # Compare with torch implementation
+    print('all tests passed!')
+
+test_mlp()
+
+# %%
+class TransformerBlock(nn.Module):
+    """
+    TransformerBlock is a module that wraps MLP and Attention.
+    It presents a single layer in Transfomer decoder which is
+    repeated several times.
+    """
+    def __init__(self, seq_len, d_model, d_mlp, d_head, n_heads, device):
+        super().__init__()
+        self.ln1 = LayerNorm(d_model, device=device)
+        self.mha = MultiHeadAttention(seq_len, d_model, d_head, n_heads, device=device)
+        self.ln2 = LayerNorm(d_model, device=device)
+        self.mlp = MLP(d_model, d_mlp, device=device)
+    
+    def forward(self, x: Float[Tensor, 'batch seq_len d_model']) -> Float[Tensor, 'batch seq_len d_model']:
+        x_norm = self.ln1(x)
+        _, attn_out = self.mha(x_norm)
+        x1 = attn_out + x
+        x1_norm = self.ln2(x1)
+        mlp_out = self.mlp(x1_norm)
+        x2 = mlp_out + x1
+        return x2
+
+def test_transformer_block():
+    batch = 2
+    seq_len = 10
+    d_model = 8
+    d_head = 4
+    n_heads = 2
+    d_mlp = 32
+
+    block = TransformerBlock(seq_len, d_model, d_mlp, d_head, n_heads, device)
+    test_input = t.randn(batch, seq_len, d_model, device=device)
+    test_output = block(test_input)
+
+    # Check shapes match
+    assert test_input.shape == test_output.shape
+
+    # Check for infinities and NaN
+    assert not t.isnan(test_output).any(), "Output contains NaN values"
+    assert not t.isinf(test_output).any(), "Output contains infinite values"
+
+    print('all transformer block tests passed!')
+
+test_transformer_block()
+
+# %%
+# Embedding
+class Embedding(nn.Module):
+    """
+    Embedding is simply a linear projection of the input sequence
+    after tokenization.
+    """
+    def __init__(self, vocab: int, d_model: int, device):
+        super().__init__()
+        self.embed = nn.Parameter(t.randn(vocab, d_model, device=device))
+
+    def forward(self, x: Int[Tensor, 'batch seq_len']) -> Float[Tensor, 'batch seq_len d_model']:
+        return self.embed[x]
+
+
+def test_embedding():
+    batch = 2
+    seq_len = 10
+    vocab_size = 1000
+    d_model = 8
+
+    embedding = Embedding(vocab_size, d_model, device)
+    # Create random token indices between 0 and vocab_size-1
+    test_input = t.randint(0, vocab_size, (batch, seq_len), device=device)
+    test_output = embedding(test_input)
+
+    # Check output shape is correct
+    expected_shape = (batch, seq_len, d_model)
+    assert test_output.shape == expected_shape, f"Expected shape {expected_shape}, got {test_output.shape}"
+
+    # Check output type is float
+    assert test_output.dtype == t.float32, f"Expected dtype float32, got {test_output.dtype}"
+
+    # Check for infinities and NaN
+    assert not t.isnan(test_output).any(), "Output contains NaN values"
+    assert not t.isinf(test_output).any(), "Output contains infinite values"
+
+    # Check that the embedding actually uses the embedding matrix
+    # by verifying output matches manual lookup
+    manual_output = embedding.embed[test_input]
+    assert t.allclose(test_output, manual_output), "Embedding lookup doesn't match manual lookup"
+
+    print('all embedding tests passed!')
+
+test_embedding()
+
+# %%
+class PositionalEmbedding(nn.Module):
+    def __init__(self, seq_len: int, d_model: int, device):
+        super().__init__()
+        self.positional_embedding = nn.Parameter(
+            t.empty((seq_len, d_model), device=device)
+        )
+        nn.init.normal_(self.positional_embedding)
+    
+    def forward(self, x: Int[Tensor, "batch seq_len"]) -> Float[Tensor, "batch seq_len d_model"]:
+        # Get the positions up to the current sequence length
+        batch, seq_len = x.shape
+        pos = self.positional_embedding[:seq_len, :]
+        return einops.repeat(pos, 'seq d_model -> batch seq d_model', batch=batch)
+
+# %%
+class Unembedding(nn.Module):
+    """
+    The final unembedding layer in the GPT-style Transformer
+    unembeds the residual stream vectors for each position
+    returning logits over the entire vocabulary that can be used
+    for sampling autoregressively.
+    """
+    def __init__(self, d_model: int, vocab: int, device):
+        super().__init__()
+        self.w_u = nn.Parameter(t.empty((d_model, vocab), device=device))
+        nn.init.normal_(self.w_u)
+        self.b_u = nn.Parameter(t.zeros((vocab,), device=device, requires_grad=False))
+    
+    def forward(self, x: Float[Tensor, 'batch seq d_model']) -> Float[Tensor, 'batch seq vocab']:
+        """
+        We return a distribution over the vocabulary for the next most
+        likely token at each position.
+        """
+        return einops.einsum(x, self.w_u, 'batch seq d_model, d_model vocab -> batch seq vocab') + self.b_u
+        
+def test_unembedding():
+    d_model = 768
+    vocab_size = 50257
+    batch_size = 2
+    seq_len = 3
+
+    # Create a random input tensor
+    test_input = t.randn((batch_size, seq_len, d_model), device=device)
+
+    # Initialize the Unembedding module
+    unembedding = Unembedding(d_model, vocab_size, device)
+
+    # Run the forward pass
+    test_output = unembedding(test_input)
+
+    # Check the shape of the output
+    assert test_output.shape == (batch_size, seq_len, vocab_size), "Output shape is incorrect"
+
+    # Check for infinities and NaN
+    assert not t.isnan(test_output).any(), "Output contains NaN values"
+    assert not t.isinf(test_output).any(), "Output contains infinite values"
+
+    print('all unembedding tests passed!')
+
+test_unembedding()
+
+
+
+
+
+
+
+        
+
+
+
+    
+
