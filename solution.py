@@ -587,13 +587,13 @@ batch_tokens = t.cat([t.tensor(tokens.input_ids.clone().detach()) for tokens in 
 # and the optimizer.
 
 config = TransformerConfig(
-    seq_len=64,
-    d_model=96,
-    d_head=8,
-    n_heads=4,
-    d_mlp=384,
-    n_layers=4,
-    vocab=40_000,
+    seq_len=16,
+    d_model=48,
+    d_head=16,
+    n_heads=8,
+    d_mlp=768,
+    n_layers=8,
+    vocab=50257,
     device=device
 )
 
@@ -602,33 +602,61 @@ tokenized_texts = generate_dataset(config.seq_len)
 # Hyperparameters
 lr = 1e-4
 epochs = 100
-batch_size = 4
+batch_size = 512
 
 model = Transformer(config)
 
 # %%
-epochs = 1000
-def train(model, config, tokenized_texts):
+from datasets import load_dataset
+
+# Load dataset
+dataset = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train')
+tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
+tokenizer.pad_token = tokenizer.eos_token
+
+# Tokenize all texts at once
+tokenized_dataset = tokenizer(
+    dataset['text'],
+    return_tensors='pt',
+    padding='max_length',
+    truncation=True,
+    max_length=config.seq_len,
+    padding_side='right'
+)
+
+# %%
+# Create DataLoader for batching
+tensor_dataset = t.utils.data.TensorDataset(tokenized_dataset['input_ids'])
+dataloader = DataLoader(tensor_dataset, batch_size=batch_size, shuffle=True)
+
+# %%
+def train(model, config):
 
     optimizer = t.optim.Adam(model.parameters(), lr=lr)
 
-    for epoch in range(epochs):
-        for batch in tqdm(range(len(tokenized_texts) // batch_size), desc=f"Epoch {epoch+1}/{epochs}"):
-            tokens = tokenized_texts[batch * batch_size:(batch + 1) * batch_size]
-
-            # Combine the tokens into a single batch tensor
-            batch_tokens = t.cat([t.tensor(tokens.input_ids.clone().detach(), device=device) for tokens in tokenized_texts], dim=0)
-
-            # Calculate the loss
+    for epoch in tqdm(range(epochs)):
+        loss = t.ones(1)
+        for batch_idx, batch_tokens in enumerate(tqdm(dataloader, desc="Batch Progress")):
+            tqdm.write(f"Batch {batch_idx + 1}/{len(dataloader)}")
+            # batch_tokens will be shape [batch_size, seq_len]
+            batch_tokens = batch_tokens[0].to(device)  # Move to device
+            
+            # Calculate loss
             loss = model.loss(batch_tokens)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-        print(f"Epoch {epoch}, Batch {batch}, Loss: {loss.item()}")
+        print(f"Epoch {epoch}, Loss: {loss.item()}")
 
-train(model, config, tokenized_texts)
+train(model, config)
+
+# %%
+# Save the model weights to file
+model_save_path = "model_weights.pth"
+t.save(model.state_dict(), model_save_path)
+print(f"Model weights saved to {model_save_path}")
 
 # %%
 def generate():
@@ -636,7 +664,7 @@ def generate():
         tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
         tokenizer.pad_token = tokenizer.eos_token
 
-        sample_text = "The quick"
+        sample_text = "quick brown fox"
         # Tokenize the sample text
 
         # Tokenize the sample texts with padding_side='right' and pad to max_length
@@ -665,6 +693,31 @@ def generate():
         print("Sample output: ", output_text)
 generate()
 
-    
+# %%
+def predict(input_text):
+    with t.no_grad():
+        tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
+        tokenizer.pad_token = tokenizer.eos_token
+
+        # Tokenize the input text with padding_side='right' and pad to max_length
+        tokens = tokenizer(
+                input_text, 
+                return_tensors='pt',
+                padding='max_length',
+                truncation=True,
+                max_length=config.seq_len,
+                padding_side='right',
+            )['input_ids']
+        tokens = tokens.to(device)
+
+        seq_len = (tokens[0] == tokenizer.pad_token_id).nonzero()[0].item()
+
+        logits = model(tokens)
+        print(f"{logits.shape}")
+        print(f": {tokenizer.decode(logits[0].argmax(dim=-1))}")
+
+predict("India has system, and has been the world's most populous democracy since")
+
+# %%
 
 # %%
