@@ -12,6 +12,7 @@ import einops
 import numpy as np
 import torch as t
 import torch.nn as nn
+import torch.nn.functional as F
 import wandb
 import matplotlib.pyplot as plt
 
@@ -501,6 +502,11 @@ class Transformer(nn.Module):
         x_norm = self.layer_norm(x)
         logits = self.unembed(x_norm)
         return logits
+    
+    def loss(self, tokens: Int[Tensor, 'batch seq']) -> Float[Tensor, '']:
+        logits = self.forward(tokens)
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), tokens.view(-1))
+        return loss
 
 # Question: where is the autoregressive bit that's used for training?
 # Answer: given a list of tokens we'll get back a bunch of distributions (as logits) over all tokens
@@ -533,4 +539,132 @@ def test_transformer():
     print("All tests passed!")
 
 test_transformer()
+
+# %%
+def generate_dataset(seq_len = 512):
+    # Generate some sample text to train the transformer on
+    sample_texts = [
+        "The quick brown fox jumps over the lazy dog.",
+        "Machine learning models process text by breaking it into tokens.",
+        "Neural networks have transformed natural language processing.",
+        "Deep learning techniques are widely used in computer vision.",
+        "Reinforcement learning is a type of machine learning.",
+        "Natural language understanding is a challenging task.",
+        "Transfer learning helps in improving model performance.",
+        "Convolutional neural networks are effective for image recognition.",
+        "Generative adversarial networks can create realistic images.",
+        "Attention mechanisms improve the performance of neural networks."
+        "Attention mechanisms improve the performance of neural networks."
+        "Attention mechanisms improve the performance of neural networks."
+    ]
+
+    # Instantiate the tokenizer
+    tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
+    tokenizer.pad_token = tokenizer.eos_token
+
+    # Tokenize the sample texts with padding_side='right' and pad to max_length
+    tokenized_texts = [
+        tokenizer(
+            text, 
+            return_tensors='pt',
+            padding='max_length',
+            truncation=True,
+            max_length=seq_len,
+            padding_side='right'
+        ) 
+        for text in sample_texts
+    ]
+
+    return tokenized_texts
+
+tokenized_texts = generate_dataset()
+
+batch_tokens = t.cat([t.tensor(tokens.input_ids.clone().detach()) for tokens in tokenized_texts], dim=0)
+
+# %%
+# Next we need to implement the training loop
+# This should include the cross-entropy loss function
+# and the optimizer.
+
+config = TransformerConfig(
+    seq_len=64,
+    d_model=96,
+    d_head=8,
+    n_heads=4,
+    d_mlp=384,
+    n_layers=4,
+    vocab=40_000,
+    device=device
+)
+
+tokenized_texts = generate_dataset(config.seq_len)
+
+# Hyperparameters
+lr = 1e-4
+epochs = 100
+batch_size = 4
+
+model = Transformer(config)
+
+# %%
+epochs = 1000
+def train(model, config, tokenized_texts):
+
+    optimizer = t.optim.Adam(model.parameters(), lr=lr)
+
+    for epoch in range(epochs):
+        for batch in tqdm(range(len(tokenized_texts) // batch_size), desc=f"Epoch {epoch+1}/{epochs}"):
+            tokens = tokenized_texts[batch * batch_size:(batch + 1) * batch_size]
+
+            # Combine the tokens into a single batch tensor
+            batch_tokens = t.cat([t.tensor(tokens.input_ids.clone().detach(), device=device) for tokens in tokenized_texts], dim=0)
+
+            # Calculate the loss
+            loss = model.loss(batch_tokens)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        print(f"Epoch {epoch}, Batch {batch}, Loss: {loss.item()}")
+
+train(model, config, tokenized_texts)
+
+# %%
+def generate():
+    with t.no_grad():
+        tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
+        tokenizer.pad_token = tokenizer.eos_token
+
+        sample_text = "The quick"
+        # Tokenize the sample text
+
+        # Tokenize the sample texts with padding_side='right' and pad to max_length
+        tokens = tokenizer(
+                sample_text, 
+                return_tensors='pt',
+                padding='max_length',
+                truncation=True,
+                max_length=config.seq_len,
+                padding_side='right',
+            )['input_ids']
+        tokens = tokens.to(device)
+
+        seq_len = (tokens[0] == tokenizer.pad_token_id).nonzero()[0].item()
+
+        for n in range(seq_len, config.seq_len):
+            logits = model(tokens)
+            top_5_tokens = logits[0, n-1].topk(5).indices
+            prefix = tokenizer.decode(tokens[0, :n])
+            print(f"{prefix}")
+            print(f": {[tokenizer.decode([token_id]) for token_id in top_5_tokens]}")
+            next_token = top_5_tokens[0]
+            tokens[0, n] = next_token # replace pad token with new prediction
+
+        output_text = tokenizer.decode(token_ids=tokens[0])
+        print("Sample output: ", output_text)
+generate()
+
+    
+
 # %%
