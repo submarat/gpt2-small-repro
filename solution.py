@@ -28,7 +28,8 @@ from transformer_lens.utils import gelu_new, tokenize_and_concatenate
 from transformers import PreTrainedTokenizerFast
 from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
 
-device = t.device('mps' if t.backends.mps.is_available() else 'cuda' if t.cuda.is_available() else 'cpu')
+# device = t.device('mps' if t.backends.mps.is_available() else 'cuda' if t.cuda.is_available() else 'cpu')
+device = t.device('cpu')
 
 MAIN = __name__ == '__main__'
 
@@ -139,6 +140,7 @@ print(completion)
 class TransformerConfig:
     d_model: int = 768
     layer_norm_eps: float = 1e-5
+    init_range: float = 0.2
     vocab: int = 50257
     seq_len: int = 1024
     d_head: int = 64
@@ -161,13 +163,19 @@ class MultiHeadAttention(nn.Module):
         self.device = device
         
         # Query projection matrix
-        self.W_q = nn.Parameter(t.randn(config.n_heads, config.d_model, config.d_head, device=device)) 
+        self.W_Q = nn.Parameter(t.randn(config.n_heads, config.d_model, config.d_head, device=device)) 
         # Key projection matrix
-        self.W_k = nn.Parameter(t.randn(config.n_heads, config.d_model, config.d_head, device=device))
+        self.W_K = nn.Parameter(t.randn(config.n_heads, config.d_model, config.d_head, device=device))
         # Value projection matrix
-        self.W_v = nn.Parameter(t.randn(config.n_heads, config.d_model, config.d_head, device=device))
+        self.W_V = nn.Parameter(t.randn(config.n_heads, config.d_model, config.d_head, device=device))
         # Output projection matrix to obtain final values
-        self.W_o = nn.Parameter(t.randn(config.n_heads, config.d_head, config.d_model, device=device))
+        self.W_O = nn.Parameter(t.randn(config.n_heads, config.d_head, config.d_model, device=device))
+        # Biases
+        self.b_Q = nn.Parameter(t.zeros(config.n_heads, config.d_head, device=device))
+        self.b_K = nn.Parameter(t.zeros(config.n_heads, config.d_head, device=device))
+        self.b_V = nn.Parameter(t.zeros(config.n_heads, config.d_head, device=device))
+        self.b_O = nn.Parameter(t.zeros(config.d_model, device=device))
+        self.register_buffer("IGNORE", t.tensor(float("-inf"), device=device, dtype=t.float32))
 
     def forward(self, x: Float[Tensor, "batch seq d_model"]) -> Float[Tensor, "batch seq d_model"]:
         seq_len = x.shape[-2]
@@ -176,9 +184,9 @@ class MultiHeadAttention(nn.Module):
         causal_mask = t.triu(t.ones(seq_len, seq_len, dtype=bool, device=device), diagonal=1)
 
         # Project input into Q, K, V using einops
-        queries = einops.einsum(x, self.W_q, 'batch seq d_model, n_heads d_model d_head -> batch seq n_heads d_head')
-        keys = einops.einsum(x, self.W_k, 'batch seq d_model, n_heads d_model d_head -> batch seq n_heads d_head')
-        values = einops.einsum(x, self.W_v, 'batch seq d_model, n_heads d_model d_head -> batch seq n_heads d_head')
+        queries = einops.einsum(x, self.W_Q, 'batch seq d_model, n_heads d_model d_head -> batch seq n_heads d_head') + self.b_Q
+        keys = einops.einsum(x, self.W_K, 'batch seq d_model, n_heads d_model d_head -> batch seq n_heads d_head') + self.b_K
+        values = einops.einsum(x, self.W_V, 'batch seq d_model, n_heads d_model d_head -> batch seq n_heads d_head') + self.b_V
 
         # Calculate attention scores and apply scaling
         attn_scores = einops.einsum(
@@ -200,9 +208,9 @@ class MultiHeadAttention(nn.Module):
 
         # Project back to d_model dimension
         out = einops.einsum(
-            outputs, self.W_o,
+            outputs, self.W_O,
             'batch seq n_heads d_head, n_heads d_head d_model -> batch seq d_model'
-        )
+        ) + self.b_O
 
         return attn_probs, out
 
@@ -262,8 +270,8 @@ class LayerNorm(nn.Module):
             - config - TransformerConfig object containing model configuration
         """
         super().__init__()
-        self.scale = nn.Parameter(t.ones(config.d_model, device=device))
-        self.shift = nn.Parameter(t.zeros(config.d_model, device=device))
+        self.w = nn.Parameter(t.ones(config.d_model, device=device))
+        self.b = nn.Parameter(t.zeros(config.d_model, device=device))
         self.eps = config.layer_norm_eps
 
     def forward(self, x: Float[Tensor, 'batch seq d_model']) -> Float[Tensor, 'batch seq d_model']:
@@ -273,8 +281,8 @@ class LayerNorm(nn.Module):
         x = (x - means)/(variances + self.eps)**0.5
         
         # Scale and translate
-        x = x * self.scale
-        x = x + self.shift
+        x = x * self.w
+        x = x + self.b
         return x
 
 
@@ -291,8 +299,8 @@ def test_layer_norm():
 
     # Compare to torch LayerNorm implementation
     torch_ln = nn.LayerNorm(config.d_model, device=device)
-    torch_ln.weights = ln.scale
-    torch_ln.bias = ln.shift
+    torch_ln.weight = ln.w
+    torch_ln.bias = ln.b
 
     expected_output = torch_ln(test_input)
     assert t.allclose(expected_output.cpu(), test_output.cpu())
@@ -305,14 +313,27 @@ test_layer_norm()
 # MLP layer
 class MLP(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, cfg):
         super().__init__()
-        self.l1 = nn.Linear(config.d_model, config.d_mlp, device=device)
-        self.gelu = nn.GELU()
-        self.l2 = nn.Linear(config.d_mlp, config.d_model, device=device)
+        self.cfg = cfg
+        self.W_in = nn.Parameter(t.empty((cfg.d_model, cfg.d_mlp)))
+        self.W_out = nn.Parameter(t.empty((cfg.d_mlp, cfg.d_model)))
+        self.b_in = nn.Parameter(t.zeros((cfg.d_mlp)))
+        self.b_out = nn.Parameter(t.zeros((cfg.d_model)))
+        nn.init.normal_(self.W_in, std=self.cfg.init_range)
+        nn.init.normal_(self.W_out, std=self.cfg.init_range)
     
     def forward(self, x: Float[Tensor, 'batch seq d_model']) -> Float[Tensor, 'batch seq d_model']:
-        return self.l2(self.gelu(self.l1(x)))
+        pre = einops.einsum(
+            x, self.W_in,
+            "batch position d_model, d_model d_mlp -> batch position d_mlp", 
+        ) + self.b_in
+        post = gelu_new(pre)
+        mlp_out = einops.einsum(
+            post, self.W_out,
+            "batch position d_mlp, d_mlp d_model -> batch position d_model", 
+        ) + self.b_out
+        return mlp_out
 
 def test_mlp():
     config = TransformerConfig(seq_len=10, d_model=8, d_mlp=32)
@@ -335,6 +356,8 @@ def test_mlp():
 test_mlp()
 
 # %%
+
+# %%
 class TransformerBlock(nn.Module):
     """
     TransformerBlock is a module that wraps MLP and Attention.
@@ -344,13 +367,13 @@ class TransformerBlock(nn.Module):
     def __init__(self, config: TransformerConfig):
         super().__init__()
         self.ln1 = LayerNorm(config)
-        self.mha = MultiHeadAttention(config)
+        self.attn = MultiHeadAttention(config)
         self.ln2 = LayerNorm(config)
         self.mlp = MLP(config)
     
     def forward(self, x: Float[Tensor, 'batch seq_len d_model']) -> Float[Tensor, 'batch seq_len d_model']:
         x_norm = self.ln1(x)
-        _, attn_out = self.mha(x_norm)
+        _, attn_out = self.attn(x_norm)
         x1 = attn_out + x
         x1_norm = self.ln2(x1)
         mlp_out = self.mlp(x1_norm)
@@ -384,10 +407,10 @@ class Embedding(nn.Module):
     """
     def __init__(self, config: TransformerConfig):
         super().__init__()
-        self.embed = nn.Parameter(t.randn(config.vocab, config.d_model, device=device))
+        self.W_E = nn.Parameter(t.randn(config.vocab, config.d_model, device=device))
 
     def forward(self, x: Int[Tensor, 'batch seq_len']) -> Float[Tensor, 'batch seq_len d_model']:
-        return self.embed[x]
+        return self.W_E[x]
 
 
 def test_embedding():
@@ -412,7 +435,7 @@ def test_embedding():
 
     # Check that the embedding actually uses the embedding matrix
     # by verifying output matches manual lookup
-    manual_output = embedding.embed[test_input]
+    manual_output = embedding.W_E[test_input]
     assert t.allclose(test_output, manual_output), "Embedding lookup doesn't match manual lookup"
 
     print('all embedding tests passed!')
@@ -423,15 +446,15 @@ test_embedding()
 class PositionalEmbedding(nn.Module):
     def __init__(self, config: TransformerConfig):
         super().__init__()
-        self.positional_embedding = nn.Parameter(
+        self.W_pos = nn.Parameter(
             t.empty((config.seq_len, config.d_model), device=device)
         )
-        nn.init.normal_(self.positional_embedding)
+        nn.init.normal_(self.W_pos)
     
     def forward(self, x: Int[Tensor, "batch seq_len"]) -> Float[Tensor, "batch seq_len d_model"]:
         # Get the positions up to the current sequence length
         batch, seq_len = x.shape
-        pos = self.positional_embedding[:seq_len, :]
+        pos = self.W_pos[:seq_len, :]
         return einops.repeat(pos, 'seq d_model -> batch seq d_model', batch=batch)
 
 # %%
@@ -444,16 +467,16 @@ class Unembedding(nn.Module):
     """
     def __init__(self, config: TransformerConfig):
         super().__init__()
-        self.w_u = nn.Parameter(t.empty((config.d_model, config.vocab), device=device))
-        nn.init.normal_(self.w_u)
-        self.b_u = nn.Parameter(t.zeros((config.vocab,), device=device, requires_grad=False))
+        self.W_U = nn.Parameter(t.empty((config.d_model, config.vocab), device=device))
+        nn.init.normal_(self.W_U)
+        self.b_U = nn.Parameter(t.zeros((config.vocab,), device=device, requires_grad=False))
     
     def forward(self, x: Float[Tensor, 'batch seq d_model']) -> Float[Tensor, 'batch seq vocab']:
         """
         We return a distribution over the vocabulary for the next most
         likely token at each position.
         """
-        return einops.einsum(x, self.w_u, 'batch seq d_model, d_model vocab -> batch seq vocab') + self.b_u
+        return einops.einsum(x, self.W_U, 'batch seq d_model, d_model vocab -> batch seq vocab') + self.b_U
         
 def test_unembedding():
     config = TransformerConfig(d_model=768, vocab=50257, seq_len=3)
@@ -491,7 +514,7 @@ class Transformer(nn.Module):
 
         self.blocks = nn.Sequential(*[TransformerBlock(config) for _ in range(config.n_layers)])
 
-        self.layer_norm = LayerNorm(config)
+        self.ln_final = LayerNorm(config)
         self.unembed = Unembedding(config)
     
     def forward(self, tokens: Int[Tensor, 'batch seq']) -> Float[Tensor, 'batch seq vocab']:
@@ -500,7 +523,7 @@ class Transformer(nn.Module):
         x = x_embed + x_pos
 
         x = self.blocks(x)
-        x_norm = self.layer_norm(x)
+        x_norm = self.ln_final(x)
         logits = self.unembed(x_norm)
         return logits
     
@@ -697,7 +720,7 @@ def generate():
 
         output_text = tokenizer.decode(token_ids=tokens[0])
         print("Sample output: ", output_text)
-generate()
+# generate()
 
 # %%
 def predict(input_text):
@@ -722,7 +745,7 @@ def predict(input_text):
         print(f"{logits.shape}")
         print(f": {tokenizer.decode(logits[0].argmax(dim=-1))}")
 
-predict("India has system, and has been the world's most populous democracy since")
+# predict("India has system, and has been the world's most populous democracy since")
 
 # %%
 demo_gpt2 = Transformer(TransformerConfig()).to(device)
@@ -731,7 +754,7 @@ demo_gpt2.load_state_dict(reference_gpt2.state_dict(), strict=False)
 test_string = '''The Total Perspective Vortex derives its picture of the whole Universe on the principle of'''
 for i in tqdm(range(100)):
     test_tokens = reference_gpt2.to_tokens(test_string).to(device)
-    demo_logits = reference_gpt2(test_tokens)
+    demo_logits = demo_gpt2(test_tokens)
     test_string += reference_gpt2.tokenizer.decode(demo_logits[-1, -1].argmax())
 
 print(test_string)
