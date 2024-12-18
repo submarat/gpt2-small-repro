@@ -134,17 +134,19 @@ print(completion)
 # Self attention
 # In this section we will implement the attention head which consists of
 # Q, K, V tensors which we will multiple to obtain
+
 @dataclass
 class TransformerConfig:
-    seq_len: int = 64
-    d_model: int = 16
-    d_head: int = 32
-    n_heads: int = 8
-    d_mlp: int = 16
-    n_layers: int = 2
-    vocab: int = 128
-    device: str = 'cpu'
+    d_model: int = 768
+    layer_norm_eps: float = 1e-5
+    vocab: int = 50257
+    seq_len: int = 1024
+    d_head: int = 64
+    d_mlp: int = 3072
+    n_heads: int = 12
+    n_layers: int = 12
 
+# %%
 class MultiHeadAttention(nn.Module):
 
     def __init__(self, config: TransformerConfig):
@@ -156,23 +158,22 @@ class MultiHeadAttention(nn.Module):
 
         self.seq_len = config.seq_len
         self.d_head = config.d_head
-        self.device = config.device
+        self.device = device
         
-        self.causal_mask = t.triu(t.ones(config.seq_len, config.seq_len, dtype=bool, device=config.device), diagonal=1)
-
         # Query projection matrix
-        self.W_q = nn.Parameter(t.randn(config.n_heads, config.d_model, config.d_head, device=config.device)) 
+        self.W_q = nn.Parameter(t.randn(config.n_heads, config.d_model, config.d_head, device=device)) 
         # Key projection matrix
-        self.W_k = nn.Parameter(t.randn(config.n_heads, config.d_model, config.d_head, device=config.device))
+        self.W_k = nn.Parameter(t.randn(config.n_heads, config.d_model, config.d_head, device=device))
         # Value projection matrix
-        self.W_v = nn.Parameter(t.randn(config.n_heads, config.d_model, config.d_head, device=config.device))
+        self.W_v = nn.Parameter(t.randn(config.n_heads, config.d_model, config.d_head, device=device))
         # Output projection matrix to obtain final values
-        self.W_o = nn.Parameter(t.randn(config.n_heads, config.d_head, config.d_model, device=config.device))
+        self.W_o = nn.Parameter(t.randn(config.n_heads, config.d_head, config.d_model, device=device))
 
     def forward(self, x: Float[Tensor, "batch seq d_model"]) -> Float[Tensor, "batch seq d_model"]:
-        seq_len = self.seq_len
+        seq_len = x.shape[-2]
         d_head = self.d_head
-        causal_mask = self.causal_mask
+
+        causal_mask = t.triu(t.ones(seq_len, seq_len, dtype=bool, device=device), diagonal=1)
 
         # Project input into Q, K, V using einops
         queries = einops.einsum(x, self.W_q, 'batch seq d_model, n_heads d_model d_head -> batch seq n_heads d_head')
@@ -207,11 +208,11 @@ class MultiHeadAttention(nn.Module):
 
 
 def test_mha():
-    config = TransformerConfig(seq_len=10, d_model=16, d_head=8, n_heads=2, device=device)
+    config = TransformerConfig(seq_len=10, d_model=16, d_head=8, n_heads=2)
     mha = MultiHeadAttention(config)
 
     # Test 1: Check output shapes
-    test_input = t.randn(2, config.seq_len, config.d_model, device=config.device)
+    test_input = t.randn(2, config.seq_len, config.d_model, device=device)
     test_attn_probs, test_out = mha(test_input)
 
     expected_attn_shape = (2, config.n_heads, config.seq_len, config.seq_len)
@@ -237,10 +238,10 @@ test_mha()
 
 # %%
 # Visualize attention probabilities
-config = TransformerConfig(seq_len=10, d_model=16, d_head=8, n_heads=2, device=device)
+config = TransformerConfig(seq_len=10, d_model=16, d_head=8, n_heads=2)
 mha = MultiHeadAttention(config)
 
-test_input = t.randn(2, config.seq_len, config.d_model, device=config.device)
+test_input = t.randn(2, config.seq_len, config.d_model, device=device)
 test_attn_probs, test_out = mha(test_input)
 
 plt.figure(figsize=(12, 4))
@@ -261,9 +262,9 @@ class LayerNorm(nn.Module):
             - config - TransformerConfig object containing model configuration
         """
         super().__init__()
-        self.scale = nn.Parameter(t.ones(config.d_model, device=config.device))
-        self.shift = nn.Parameter(t.zeros(config.d_model, device=config.device))
-        self.eps = 1e-5
+        self.scale = nn.Parameter(t.ones(config.d_model, device=device))
+        self.shift = nn.Parameter(t.zeros(config.d_model, device=device))
+        self.eps = config.layer_norm_eps
 
     def forward(self, x: Float[Tensor, 'batch seq d_model']) -> Float[Tensor, 'batch seq d_model']:
         # Normalize to mean 0, variance 1
@@ -279,17 +280,17 @@ class LayerNorm(nn.Module):
 
 def test_layer_norm():
     batch, seq_len = 2, 3
-    config = TransformerConfig(d_model=5, device=device)
+    config = TransformerConfig(d_model=5)
     ln = LayerNorm(config)
 
-    test_input = t.randn(batch, seq_len, config.d_model, device=config.device)
+    test_input = t.randn(batch, seq_len, config.d_model, device=device)
     test_output = ln(test_input)
 
     # Confirm that input and output shape match
     assert test_input.shape == test_output.shape
 
     # Compare to torch LayerNorm implementation
-    torch_ln = nn.LayerNorm(config.d_model, device=config.device)
+    torch_ln = nn.LayerNorm(config.d_model, device=device)
     torch_ln.weights = ln.scale
     torch_ln.bias = ln.shift
 
@@ -314,11 +315,11 @@ class MLP(nn.Module):
         return self.l2(self.gelu(self.l1(x)))
 
 def test_mlp():
-    config = TransformerConfig(seq_len=10, d_model=8, d_mlp=32, device=device)
+    config = TransformerConfig(seq_len=10, d_model=8, d_mlp=32)
     batch = 2
 
     mlp = MLP(config)
-    test_input = t.randn(batch, config.seq_len, config.d_model, device=config.device)
+    test_input = t.randn(batch, config.seq_len, config.d_model, device=device)
     test_output = mlp(test_input)
 
     # Input/output both come from and return to residual stream
@@ -357,10 +358,10 @@ class TransformerBlock(nn.Module):
         return x2
 
 def test_transformer_block():
-    config = TransformerConfig(seq_len=10, d_model=8, d_head=4, n_heads=2, d_mlp = 32, device=device)
+    config = TransformerConfig(seq_len=10, d_model=8, d_head=4, n_heads=2, d_mlp = 32)
 
     block = TransformerBlock(config)
-    test_input = t.randn(2, config.seq_len, config.d_model, device=config.device)
+    test_input = t.randn(2, config.seq_len, config.d_model, device=device)
     test_output = block(test_input)
 
     # Check shapes match
@@ -383,19 +384,19 @@ class Embedding(nn.Module):
     """
     def __init__(self, config: TransformerConfig):
         super().__init__()
-        self.embed = nn.Parameter(t.randn(config.vocab, config.d_model, device=config.device))
+        self.embed = nn.Parameter(t.randn(config.vocab, config.d_model, device=device))
 
     def forward(self, x: Int[Tensor, 'batch seq_len']) -> Float[Tensor, 'batch seq_len d_model']:
         return self.embed[x]
 
 
 def test_embedding():
-    config = TransformerConfig(seq_len=10, d_model=8, vocab=1000, device=device)
+    config = TransformerConfig(seq_len=10, d_model=8, vocab=1000)
     batch = 2
 
     embedding = Embedding(config)
     # Create random token indices between 0 and config.vocab-1
-    test_input = t.randint(0, config.vocab, (batch, config.seq_len), device=config.device)
+    test_input = t.randint(0, config.vocab, (batch, config.seq_len), device=device)
     test_output = embedding(test_input)
 
     # Check output shape is correct
@@ -423,7 +424,7 @@ class PositionalEmbedding(nn.Module):
     def __init__(self, config: TransformerConfig):
         super().__init__()
         self.positional_embedding = nn.Parameter(
-            t.empty((config.seq_len, config.d_model), device=config.device)
+            t.empty((config.seq_len, config.d_model), device=device)
         )
         nn.init.normal_(self.positional_embedding)
     
@@ -443,9 +444,9 @@ class Unembedding(nn.Module):
     """
     def __init__(self, config: TransformerConfig):
         super().__init__()
-        self.w_u = nn.Parameter(t.empty((config.d_model, config.vocab), device=config.device))
+        self.w_u = nn.Parameter(t.empty((config.d_model, config.vocab), device=device))
         nn.init.normal_(self.w_u)
-        self.b_u = nn.Parameter(t.zeros((config.vocab,), device=config.device, requires_grad=False))
+        self.b_u = nn.Parameter(t.zeros((config.vocab,), device=device, requires_grad=False))
     
     def forward(self, x: Float[Tensor, 'batch seq d_model']) -> Float[Tensor, 'batch seq vocab']:
         """
@@ -455,11 +456,11 @@ class Unembedding(nn.Module):
         return einops.einsum(x, self.w_u, 'batch seq d_model, d_model vocab -> batch seq vocab') + self.b_u
         
 def test_unembedding():
-    config = TransformerConfig(d_model=768, vocab=50257, seq_len=3, device=device)
+    config = TransformerConfig(d_model=768, vocab=50257, seq_len=3)
     batch_size = 2
 
     # Create a random input tensor
-    test_input = t.randn((batch_size, config.seq_len, config.d_model), device=config.device)
+    test_input = t.randn((batch_size, config.seq_len, config.d_model), device=device)
 
     # Initialize the Unembedding module
     unembedding = Unembedding(config)
@@ -526,7 +527,6 @@ def test_transformer():
         d_mlp=20,
         n_layers=2,
         vocab=100,
-        device=device
     )
 
     transformer = Transformer(config)
@@ -586,18 +586,16 @@ batch_tokens = t.cat([t.tensor(tokens.input_ids.clone().detach()) for tokens in 
 # This should include the cross-entropy loss function
 # and the optimizer.
 
-config = TransformerConfig(
-    seq_len=16,
-    d_model=48,
-    d_head=16,
-    n_heads=8,
-    d_mlp=768,
-    n_layers=8,
-    vocab=50257,
-    device=device
-)
 
-tokenized_texts = generate_dataset(config.seq_len)
+config = TransformerConfig(
+    d_model=768,
+    vocab=50257,
+    seq_len=1024,
+    d_head=64,
+    d_mlp=3072,
+    n_heads=12,
+    n_layers=12,
+)
 
 # Hyperparameters
 lr = 1e-4
@@ -609,25 +607,39 @@ model = Transformer(config)
 # %%
 from datasets import load_dataset
 
-# Load dataset
-dataset = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train')
-tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
-tokenizer.pad_token = tokenizer.eos_token
+def load_wikitext_dataset():
+    # Load dataset
+    dataset = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train')
+    tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
+    tokenizer.pad_token = tokenizer.eos_token
 
-# Tokenize all texts at once
-tokenized_dataset = tokenizer(
-    dataset['text'],
-    return_tensors='pt',
-    padding='max_length',
-    truncation=True,
-    max_length=config.seq_len,
-    padding_side='right'
-)
+    # Tokenize all texts at once
+    tokenized_dataset = tokenizer(
+        dataset['text'],
+        return_tensors='pt',
+        padding='max_length',
+        truncation=True,
+        max_length=config.seq_len,
+        padding_side='right'
+    )
+
+    # Create DataLoader for batching
+    tensor_dataset = t.utils.data.TensorDataset(tokenized_dataset['input_ids'])
+    dataloader = DataLoader(tensor_dataset, batch_size=batch_size, shuffle=True)
+    return dataloader
 
 # %%
-# Create DataLoader for batching
-tensor_dataset = t.utils.data.TensorDataset(tokenized_dataset['input_ids'])
-dataloader = DataLoader(tensor_dataset, batch_size=batch_size, shuffle=True)
+def load_pile_10k_dataset(batch_size, max_length):
+    dataset = datasets.load_dataset("NeelNanda/pile-10k", split="train").remove_columns("meta")
+    tokenized_dataset = tokenize_and_concatenate(dataset, reference_gpt2.tokenizer, streaming=False, max_length=max_length, column_name="text", add_bos_token=True, num_proc=4)
+    tokenized_dataset = tokenize_and_concatenate(dataset, reference_gpt2.tokenizer, streaming=False, max_length=max_length, column_name="text", add_bos_token=True, num_proc=4)
+
+    dataset_dict = tokenized_dataset.train_test_split(test_size=1000)
+    train_loader = DataLoader(dataset_dict["train"], batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+    test_loader = DataLoader(dataset_dict["test"], batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+    return train_loader
+
+# dataloader = load_pile_10k_dataset(batch_size, config.seq_len)
 
 # %%
 def train(model, config):
@@ -639,7 +651,7 @@ def train(model, config):
         for batch_idx, batch_tokens in enumerate(tqdm(dataloader, desc="Batch Progress")):
             tqdm.write(f"Batch {batch_idx + 1}/{len(dataloader)}")
             # batch_tokens will be shape [batch_size, seq_len]
-            batch_tokens = batch_tokens[0].to(device)  # Move to device
+            batch_tokens = batch_tokens['tokens'].to(device)  # Move to device
             
             # Calculate loss
             loss = model.loss(batch_tokens)
@@ -650,13 +662,7 @@ def train(model, config):
 
         print(f"Epoch {epoch}, Loss: {loss.item()}")
 
-train(model, config)
-
-# %%
-# Save the model weights to file
-model_save_path = "model_weights.pth"
-t.save(model.state_dict(), model_save_path)
-print(f"Model weights saved to {model_save_path}")
+# train(model, config)
 
 # %%
 def generate():
@@ -719,5 +725,13 @@ def predict(input_text):
 predict("India has system, and has been the world's most populous democracy since")
 
 # %%
+demo_gpt2 = Transformer(TransformerConfig()).to(device)
+demo_gpt2.load_state_dict(reference_gpt2.state_dict(), strict=False)
 
-# %%
+test_string = '''The Total Perspective Vortex derives its picture of the whole Universe on the principle of'''
+for i in tqdm(range(100)):
+    test_tokens = reference_gpt2.to_tokens(test_string).to(device)
+    demo_logits = reference_gpt2(test_tokens)
+    test_string += reference_gpt2.tokenizer.decode(demo_logits[-1, -1].argmax())
+
+print(test_string)
