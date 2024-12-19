@@ -28,8 +28,8 @@ from transformer_lens.utils import gelu_new, tokenize_and_concatenate
 from transformers import PreTrainedTokenizerFast
 from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
 
-# device = t.device('mps' if t.backends.mps.is_available() else 'cuda' if t.cuda.is_available() else 'cpu')
-device = t.device('cpu')
+device = t.device('mps' if t.backends.mps.is_available() else 'cuda' if t.cuda.is_available() else 'cpu')
+# device = t.device('cpu')
 
 MAIN = __name__ == '__main__'
 
@@ -140,7 +140,7 @@ print(completion)
 class TransformerConfig:
     d_model: int = 768
     layer_norm_eps: float = 1e-5
-    init_range: float = 0.2
+    init_range: float = 0.02
     vocab: int = 50257
     seq_len: int = 1024
     d_head: int = 64
@@ -163,13 +163,17 @@ class MultiHeadAttention(nn.Module):
         self.device = device
         
         # Query projection matrix
-        self.W_Q = nn.Parameter(t.randn(config.n_heads, config.d_model, config.d_head, device=device)) 
+        self.W_Q = nn.Parameter(t.empty(config.n_heads, config.d_model, config.d_head, device=device))
+        nn.init.normal_(self.W_Q, std=config.init_range)
         # Key projection matrix
-        self.W_K = nn.Parameter(t.randn(config.n_heads, config.d_model, config.d_head, device=device))
+        self.W_K = nn.Parameter(t.empty(config.n_heads, config.d_model, config.d_head, device=device))
+        nn.init.normal_(self.W_K, std=config.init_range)
         # Value projection matrix
-        self.W_V = nn.Parameter(t.randn(config.n_heads, config.d_model, config.d_head, device=device))
+        self.W_V = nn.Parameter(t.empty(config.n_heads, config.d_model, config.d_head, device=device))
+        nn.init.normal_(self.W_V, std=config.init_range)
         # Output projection matrix to obtain final values
-        self.W_O = nn.Parameter(t.randn(config.n_heads, config.d_head, config.d_model, device=device))
+        self.W_O = nn.Parameter(t.empty(config.n_heads, config.d_head, config.d_model, device=device))
+        nn.init.normal_(self.W_O, std=config.init_range)
         # Biases
         self.b_Q = nn.Parameter(t.zeros(config.n_heads, config.d_head, device=device))
         self.b_K = nn.Parameter(t.zeros(config.n_heads, config.d_head, device=device))
@@ -339,7 +343,7 @@ def test_mlp():
     config = TransformerConfig(seq_len=10, d_model=8, d_mlp=32)
     batch = 2
 
-    mlp = MLP(config)
+    mlp = MLP(config).to(device=device)
     test_input = t.randn(batch, config.seq_len, config.d_model, device=device)
     test_output = mlp(test_input)
 
@@ -383,7 +387,7 @@ class TransformerBlock(nn.Module):
 def test_transformer_block():
     config = TransformerConfig(seq_len=10, d_model=8, d_head=4, n_heads=2, d_mlp = 32)
 
-    block = TransformerBlock(config)
+    block = TransformerBlock(config).to(device=device)
     test_input = t.randn(2, config.seq_len, config.d_model, device=device)
     test_output = block(test_input)
 
@@ -408,6 +412,7 @@ class Embedding(nn.Module):
     def __init__(self, config: TransformerConfig):
         super().__init__()
         self.W_E = nn.Parameter(t.randn(config.vocab, config.d_model, device=device))
+        nn.init.normal_(self.W_E, std=config.init_range)
 
     def forward(self, x: Int[Tensor, 'batch seq_len']) -> Float[Tensor, 'batch seq_len d_model']:
         return self.W_E[x]
@@ -417,7 +422,7 @@ def test_embedding():
     config = TransformerConfig(seq_len=10, d_model=8, vocab=1000)
     batch = 2
 
-    embedding = Embedding(config)
+    embedding = Embedding(config).to(device=device)
     # Create random token indices between 0 and config.vocab-1
     test_input = t.randint(0, config.vocab, (batch, config.seq_len), device=device)
     test_output = embedding(test_input)
@@ -468,7 +473,8 @@ class Unembedding(nn.Module):
     def __init__(self, config: TransformerConfig):
         super().__init__()
         self.W_U = nn.Parameter(t.empty((config.d_model, config.vocab), device=device))
-        nn.init.normal_(self.W_U)
+        nn.init.normal_(self.W_U, std=config.init_range)
+
         self.b_U = nn.Parameter(t.zeros((config.vocab,), device=device, requires_grad=False))
     
     def forward(self, x: Float[Tensor, 'batch seq d_model']) -> Float[Tensor, 'batch seq vocab']:
@@ -486,7 +492,7 @@ def test_unembedding():
     test_input = t.randn((batch_size, config.seq_len, config.d_model), device=device)
 
     # Initialize the Unembedding module
-    unembedding = Unembedding(config)
+    unembedding = Unembedding(config).to(device=device)
 
     # Run the forward pass
     test_output = unembedding(test_input)
@@ -527,11 +533,6 @@ class Transformer(nn.Module):
         logits = self.unembed(x_norm)
         return logits
     
-    def loss(self, tokens: Int[Tensor, 'batch seq']) -> Float[Tensor, '']:
-        logits = self.forward(tokens)
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), tokens.view(-1))
-        return loss
-
 # Question: where is the autoregressive bit that's used for training?
 # Answer: given a list of tokens we'll get back a bunch of distributions (as logits) over all tokens
 # You could sample autoregressively from Transformer at this point
@@ -552,7 +553,7 @@ def test_transformer():
         vocab=100,
     )
 
-    transformer = Transformer(config)
+    transformer = Transformer(config).to(device=device)
     test_input = t.randint(size=(batch, config.seq_len), high=config.vocab)
 
     test_output = transformer(test_input)
@@ -613,41 +614,42 @@ batch_tokens = t.cat([t.tensor(tokens.input_ids.clone().detach()) for tokens in 
 config = TransformerConfig(
     d_model=768,
     vocab=50257,
-    seq_len=1024,
+    seq_len=256,
     d_head=64,
-    d_mlp=3072,
-    n_heads=12,
-    n_layers=12,
+    d_mlp=1024,
+    n_heads=4,
+    n_layers=2,
 )
 
 # Hyperparameters
-lr = 1e-4
-epochs = 100
-batch_size = 512
+lr = 1e-3
+epochs = 50
+batch_size = 64
+weight_decay = 1e-2
+max_iter_per_epoch = 50 
 
-model = Transformer(config)
+model = Transformer(config).to(device=device)
 
 # %%
 from datasets import load_dataset
 
-def load_wikitext_dataset():
+def load_wikitext_dataset(config: TransformerConfig):
     # Load dataset
     dataset = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train')
     tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
     tokenizer.pad_token = tokenizer.eos_token
 
     # Tokenize all texts at once
-    tokenized_dataset = tokenizer(
-        dataset['text'],
-        return_tensors='pt',
-        padding='max_length',
-        truncation=True,
-        max_length=config.seq_len,
-        padding_side='right'
-    )
+    # tokenized_dataset = reference_gpt2.to_tokens(
+    #     dataset['text'],
+    #     return_tensors='pt',
+    #     truncation=True,
+    #     max_length=config.seq_len,
+    # ).to(device=device)
+    tokenized_dataset = tokenize_and_concatenate(dataset, reference_gpt2.tokenizer, streaming=False, max_length=config.seq_len, column_name="text", add_bos_token=True, num_proc=4)
 
     # Create DataLoader for batching
-    tensor_dataset = t.utils.data.TensorDataset(tokenized_dataset['input_ids'])
+    tensor_dataset = t.utils.data.TensorDataset(tokenized_dataset['tokens'])
     dataloader = DataLoader(tensor_dataset, batch_size=batch_size, shuffle=True)
     return dataloader
 
@@ -662,30 +664,65 @@ def load_pile_10k_dataset(batch_size, max_length):
     test_loader = DataLoader(dataset_dict["test"], batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
     return train_loader
 
+# %%
 # dataloader = load_pile_10k_dataset(batch_size, config.seq_len)
+dataloader = load_wikitext_dataset(config)
 
 # %%
 def train(model, config):
 
-    optimizer = t.optim.Adam(model.parameters(), lr=lr)
+    wandb.init(project="transformer_training", config={
+        "learning_rate": lr,
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "weight_decay": weight_decay,
+        "max_iter_per_epoch": max_iter_per_epoch
+    })
 
+    optimizer = t.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    table = wandb.Table(columns=["input", "next_tokens"])
+    step = 0
     for epoch in tqdm(range(epochs)):
         loss = t.ones(1)
+        iterations = 0
         for batch_idx, batch_tokens in enumerate(tqdm(dataloader, desc="Batch Progress")):
+            step += 1
             tqdm.write(f"Batch {batch_idx + 1}/{len(dataloader)}")
             # batch_tokens will be shape [batch_size, seq_len]
-            batch_tokens = batch_tokens['tokens'].to(device)  # Move to device
-            
+            batch_tokens = batch_tokens[0].to(device)  # Move to device
+
             # Calculate loss
-            loss = model.loss(batch_tokens)
+            logits = model(batch_tokens)
+            log_probs = logits.log_softmax(dim=-1)
+            log_probs_for_tokens = log_probs[:, :-1]\
+                .gather(dim=-1, index=batch_tokens[:, 1:].unsqueeze(-1)).unsqueeze(-1)
+            loss = -log_probs_for_tokens.mean()
+
+            wandb.log({"loss": loss}, step=step)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-        print(f"Epoch {epoch}, Loss: {loss.item()}")
+            if iterations > max_iter_per_epoch:
+                break
+            iterations += 1
+        
+        # Log the last loss for the epoc
+        wandb.log({"epoch": epoch, "loss": loss.item()})
 
-# train(model, config)
+        # Decode the final batch_tokens and logits by greedy sampling using reference_gpt2.tokenizer.decode
+        decoded_batch_tokens = reference_gpt2.tokenizer.decode(batch_tokens[0])
+        next_tokens = reference_gpt2.tokenizer.decode(logits[0,:].argmax(dim=-1))
+
+        table.add_data(decoded_batch_tokens, next_tokens)
+
+    wandb.log({"examples": table})
+    
+    wandb.finish()
+
+train(model, config)
 
 # %%
 def generate():
@@ -693,7 +730,7 @@ def generate():
         tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
         tokenizer.pad_token = tokenizer.eos_token
 
-        sample_text = "quick brown fox"
+        sample_text = "Grab the"
         # Tokenize the sample text
 
         # Tokenize the sample texts with padding_side='right' and pad to max_length
@@ -720,7 +757,7 @@ def generate():
 
         output_text = tokenizer.decode(token_ids=tokens[0])
         print("Sample output: ", output_text)
-# generate()
+generate()
 
 # %%
 def predict(input_text):
@@ -745,16 +782,30 @@ def predict(input_text):
         print(f"{logits.shape}")
         print(f": {tokenizer.decode(logits[0].argmax(dim=-1))}")
 
-# predict("India has system, and has been the world's most populous democracy since")
+predict("The world's most populous democracy since")
 
 # %%
+
+test_string = '''Quick brown fox'''
+for i in tqdm(range(100)):
+    test_tokens = reference_gpt2.to_tokens(test_string).to(device)
+    demo_logits = model(test_tokens)
+    test_string += reference_gpt2.tokenizer.decode(demo_logits[-1, -1].argmax())
+
+print(test_string)
+# %%
+# Test architecture with pre-trained weights
 demo_gpt2 = Transformer(TransformerConfig()).to(device)
 demo_gpt2.load_state_dict(reference_gpt2.state_dict(), strict=False)
 
-test_string = '''The Total Perspective Vortex derives its picture of the whole Universe on the principle of'''
+test_string = '''Quick brown fox'''
 for i in tqdm(range(100)):
     test_tokens = reference_gpt2.to_tokens(test_string).to(device)
     demo_logits = demo_gpt2(test_tokens)
     test_string += reference_gpt2.tokenizer.decode(demo_logits[-1, -1].argmax())
 
 print(test_string)
+
+# %%
+model = demo_gpt2
+generate()
