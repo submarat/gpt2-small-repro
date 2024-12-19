@@ -5,6 +5,7 @@ I replicate training of a gpt-2 style model trained on wikitext
 [wandb log](https://wandb.ai/m-subkhankulov-arena/transformer_training/runs/ta3ar2po?nw=nwusermsubkhankulov)
 
 Loss go down:
+
 <img width="462" alt="image" src="https://github.com/user-attachments/assets/3cb94da4-4e91-414f-b7fd-8c78b7346199" />
 
 Greedy sampling on pre-trained weights:
