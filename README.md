@@ -1,8 +1,8 @@
-<div align="center">
-  <img src="header.png" alt="GPT-2 Small Implementation" width="35%" style="border: 2px solid #333; border-radius: 15px; padding: 5px;">
-</div>
-
 # GPT-2 Small Implementation
+
+<div align="center">
+  <img src="image.png" alt="GPT-2 Small Implementation" width="35%" style="border: 2px solid #333; border-radius: 15px; padding: 5px;">
+</div>
 
 This repository contains a clean PyTorch implementation of a GPT-2 style transformer model. The implementation is based on the architecture described in the "Attention Is All You Need" paper, with modifications specific to GPT-2.
 
