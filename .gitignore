@@ -1,0 +1,37 @@
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+
+# Weights & Biases
+wandb/
+
+# PyTorch Models
+*.pt
+*.pth
+
+# Logs
+*.log
+
+# OS specific
+.DS_Store
+Thumbs.db 
