@@ -42,8 +42,6 @@ dev = [
 [tool.setuptools]
 # Define the package structure
 packages = ["gpt2_small"]
-# No need to include solution.py anymore as model.py is in the package
-# py-modules = ["solution"]
 
 [tool.black]
 line-length = 100
