@@ -28,11 +28,11 @@ def main():
     
     # Create a tiny model for fast demonstration
     config = TransformerConfig(
-        d_model=256,
+        d_model=768,
         n_heads=4,
         n_layers=2,
         d_mlp=512,
-        seq_len=128,
+        seq_len=1024,
         vocab=50257  # Standard GPT-2 vocabulary size
     )
     
