@@ -1,4 +1,4 @@
-![GPT-2 Small Implementation](header.png)
+<img src="header.png" alt="GPT-2 Small Implementation" width="50%">
 
 # GPT-2 Small Implementation
 
