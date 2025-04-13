@@ -1,4 +1,6 @@
-<img src="header.png" alt="GPT-2 Small Implementation" width="50%">
+<div align="center">
+  <img src="header.png" alt="GPT-2 Small Implementation" width="35%" style="border: 2px solid #333; border-radius: 15px; padding: 5px;">
+</div>
 
 # GPT-2 Small Implementation
 
