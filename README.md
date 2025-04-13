@@ -1,3 +1,5 @@
+![GPT-2 Small Implementation](header.png)
+
 # GPT-2 Small Implementation
 
 This repository contains a clean PyTorch implementation of a GPT-2 style transformer model. The implementation is based on the architecture described in the "Attention Is All You Need" paper, with modifications specific to GPT-2.
