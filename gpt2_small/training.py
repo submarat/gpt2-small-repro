@@ -37,8 +37,6 @@ def generate_dataset(seq_len=512):
         "Convolutional neural networks are effective for image recognition.",
         "Generative adversarial networks can create realistic images.",
         "Attention mechanisms improve the performance of neural networks."
-        "Attention mechanisms improve the performance of neural networks."
-        "Attention mechanisms improve the performance of neural networks."
     ]
 
     # Instantiate the tokenizer
