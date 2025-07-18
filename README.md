@@ -130,4 +130,5 @@ The `demos/` directory contains scripts designed to demonstrate the capabilities
 ## References
 
 - [Attention Is All You Need](https://arxiv.org/abs/1706.03762) - Original transformer paper
+- [TinyStories: How Small Can Language Models Be and Still Speak Coherent English?](https://arxiv.org/abs/2305.07759) - tiny stories dataset
 - [GPT-2: Language Models are Unsupervised Multitask Learners](https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf) - GPT-2 paper
