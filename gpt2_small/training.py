@@ -59,6 +59,25 @@ def generate_dataset(seq_len=512):
     return tokenized_texts
 
 
+def load_tiny_stories_dataset(config: TransformerConfig, batch_size: int = 64, reference_tokenizer=None):
+
+    dataset = load_dataset('roneneldan/TinyStories', 'default', split='train')
+
+    tokenized_dataset = tokenize_and_concatenate(
+        dataset, 
+        reference_tokenizer, 
+        streaming=False, 
+        max_length=config.seq_len, 
+        column_name="text", 
+        add_bos_token=True, 
+        num_proc=4
+    )
+
+    # Create DataLoader for batching
+    tensor_dataset = t.utils.data.TensorDataset(tokenized_dataset['tokens'])
+    dataloader = DataLoader(tensor_dataset, batch_size=batch_size, shuffle=True)
+    return dataloader
+
 def load_wikitext_dataset(config: TransformerConfig, batch_size: int = 64, reference_tokenizer=None):
     """
     Load the WikiText dataset for training.
@@ -148,7 +167,7 @@ def train(model, config, use_wandb=True, **kwargs):
         batch_size: Batch size (64)
         weight_decay: Weight decay for optimizer (1e-2)
         max_iter_per_epoch: Maximum iterations per epoch (50)
-        dataset: Dataset to use ('wikitext', 'pile-10k', or 'sample')
+        dataset: Dataset to use ('wikitext', 'tiny-stories', 'pile-10k', or 'sample')
     """
     
     # Hyperparameters with defaults
@@ -174,6 +193,8 @@ def train(model, config, use_wandb=True, **kwargs):
     # Get dataloader based on dataset type
     if dataset_type == 'wikitext':
         dataloader = load_wikitext_dataset(config, batch_size=batch_size)
+    elif dataset_type == 'tiny-stories':
+        dataloader = load_tiny_stories_dataset(config, batch_size=batch_size, reference_tokenizer=model.tokenizer)
     elif dataset_type == 'pile-10k':
         dataloader = load_pile_10k_dataset(batch_size, config.seq_len)
     elif dataset_type == 'sample':
@@ -214,7 +235,7 @@ def train(model, config, use_wandb=True, **kwargs):
             loss.backward()
             optimizer.step()
 
-            if iterations > max_iter_per_epoch:
+            if max_iter_per_epoch and iterations > max_iter_per_epoch:
                 break
             iterations += 1
         
