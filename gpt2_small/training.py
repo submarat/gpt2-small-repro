@@ -60,96 +60,116 @@ def generate_dataset(seq_len=512):
     return tokenized_texts
 
 
-def load_tiny_stories_dataset(config: TransformerConfig, batch_size: int = 64, reference_tokenizer=None):
+def _load_hf_dataset(repo: str, config_name, split: str):
+    """load_dataset that works across datasets versions.
 
-    dataset = load_dataset('roneneldan/TinyStories', 'default', split='train')
+    Tries the standard (parquet) path first; only older, loading-script-based
+    datasets on older datasets versions need trust_remote_code, so retry with it
+    if and only if the error asks for it.
+    """
+    try:
+        return load_dataset(repo, config_name, split=split)
+    except (ValueError, RuntimeError) as exc:
+        if 'trust_remote_code' in str(exc):
+            return load_dataset(repo, config_name, split=split, trust_remote_code=True)
+        raise
 
-    tokenized_dataset = tokenize_and_concatenate(
-        dataset, 
-        reference_tokenizer, 
-        streaming=False, 
-        max_length=config.seq_len, 
-        column_name="text", 
-        add_bos_token=True, 
-        num_proc=4
+
+def _resolve_tokenizer(reference_tokenizer=None):
+    if reference_tokenizer is not None:
+        return reference_tokenizer
+    tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
+    tokenizer.pad_token = tokenizer.eos_token
+    return tokenizer
+
+
+def _build_token_dataloader(
+    repo: str,
+    config_name,
+    seq_len: int,
+    batch_size: int,
+    reference_tokenizer=None,
+    split: str = 'train',
+    num_proc: int = 8,
+    num_workers: int = 4,
+    column_name: str = 'text',
+):
+    """Download, tokenize+concatenate into fixed-length blocks, and return a
+    DataLoader yielding ``(tokens,)`` batches of shape ``[batch_size, seq_len]``.
+
+    Works for small and large datasets: the tokenized data stays in the
+    memory-mapped Arrow dataset and is collated lazily (no giant contiguous
+    materialization), so OpenWebText / FineWeb-scale corpora don't blow up RAM.
+    """
+    tokenizer = _resolve_tokenizer(reference_tokenizer)
+    dataset = _load_hf_dataset(repo, config_name, split)
+
+    tokenized = tokenize_and_concatenate(
+        dataset,
+        tokenizer,
+        streaming=False,
+        max_length=seq_len,
+        column_name=column_name,
+        add_bos_token=True,
+        num_proc=num_proc,
+    ).with_format('torch', columns=['tokens'])
+
+    def collate(rows):
+        # Return a 1-tuple so callers can use batch[0] (matches TensorDataset).
+        return (t.stack([row['tokens'] for row in rows]),)
+
+    return DataLoader(
+        tokenized,
+        batch_size=batch_size,
+        shuffle=True,
+        drop_last=True,
+        collate_fn=collate,
+        num_workers=num_workers,
+        pin_memory=(device.type == 'cuda'),
     )
 
-    # Create DataLoader for batching
-    tensor_dataset = t.utils.data.TensorDataset(tokenized_dataset['tokens'])
-    dataloader = DataLoader(tensor_dataset, batch_size=batch_size, shuffle=True)
-    return dataloader
+
+def load_tiny_stories_dataset(config: TransformerConfig, batch_size: int = 64, reference_tokenizer=None):
+    """Load the TinyStories dataset as a DataLoader of ``(tokens,)`` batches."""
+    return _build_token_dataloader(
+        'roneneldan/TinyStories', None, config.seq_len, batch_size, reference_tokenizer,
+    )
+
 
 def load_wikitext_dataset(config: TransformerConfig, batch_size: int = 64, reference_tokenizer=None):
-    """
-    Load the WikiText dataset for training.
-    
-    Args:
-        config: TransformerConfig object
-        batch_size: Batch size for DataLoader
-        reference_tokenizer: Optional reference tokenizer to use
-        
-    Returns:
-        DataLoader for the WikiText dataset
-    """
-    # Load dataset
-    dataset = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train')
-    
-    if reference_tokenizer is None:
-        tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
-        tokenizer.pad_token = tokenizer.eos_token
-    else:
-        tokenizer = reference_tokenizer
-
-    tokenized_dataset = tokenize_and_concatenate(
-        dataset, 
-        tokenizer, 
-        streaming=False, 
-        max_length=config.seq_len, 
-        column_name="text", 
-        add_bos_token=True, 
-        num_proc=4
+    """Load WikiText-2 (raw) as a DataLoader of ``(tokens,)`` batches."""
+    return _build_token_dataloader(
+        'Salesforce/wikitext', 'wikitext-2-raw-v1', config.seq_len, batch_size, reference_tokenizer,
     )
-
-    # Create DataLoader for batching
-    tensor_dataset = t.utils.data.TensorDataset(tokenized_dataset['tokens'])
-    dataloader = DataLoader(tensor_dataset, batch_size=batch_size, shuffle=True)
-    return dataloader
 
 
 def load_pile_10k_dataset(batch_size, max_length, reference_tokenizer=None):
-    """
-    Load the Pile-10k dataset for training.
-    
-    Args:
-        batch_size: Batch size for DataLoader
-        max_length: Maximum sequence length for tokenization
-        reference_tokenizer: Optional reference tokenizer to use
-        
-    Returns:
-        DataLoader for the Pile-10k dataset
-    """
-    dataset = load_dataset("NeelNanda/pile-10k", split="train").remove_columns("meta")
-    
-    tokenized_dataset = tokenize_and_concatenate(
-        dataset, 
-        reference_tokenizer, 
-        streaming=False, 
-        max_length=max_length, 
-        column_name="text", 
-        add_bos_token=True, 
-        num_proc=4
+    """Load the Pile-10k dataset as a DataLoader of ``(tokens,)`` batches."""
+    return _build_token_dataloader(
+        'NeelNanda/pile-10k', None, max_length, batch_size, reference_tokenizer,
     )
 
-    dataset_dict = tokenized_dataset.train_test_split(test_size=1000)
-    train_loader = DataLoader(
-        dataset_dict["train"], 
-        batch_size=batch_size, 
-        shuffle=True, 
-        num_workers=4, 
-        pin_memory=True
+
+def load_openwebtext_dataset(config: TransformerConfig, batch_size: int = 64, reference_tokenizer=None, split: str = 'train'):
+    """Load OpenWebText (the community WebText replica, closest to GPT-2's data).
+
+    Full corpus is ~40 GB of text / ~9B GPT-2 tokens. Pass e.g. ``split='train[:5%]'``
+    for a subset. Requires HF cache on a large volume.
+    """
+    return _build_token_dataloader(
+        'Skylion007/openwebtext', None, config.seq_len, batch_size, reference_tokenizer, split=split,
     )
-    
-    return train_loader
+
+
+def load_fineweb_edu_dataset(config: TransformerConfig, batch_size: int = 64, reference_tokenizer=None, config_name: str = 'sample-10BT', split: str = 'train'):
+    """Load FineWeb-Edu (modern high-quality CommonCrawl-derived web text).
+
+    Defaults to the 10BT sample used by current GPT-2 speedrun repros. Use
+    ``split='train[:N]'`` to take a subset without the full download.
+    """
+    return _build_token_dataloader(
+        'HuggingFaceFW/fineweb-edu', config_name, config.seq_len, batch_size, reference_tokenizer, split=split,
+    )
 
 
 def train(model, config, use_wandb=True, **kwargs):
@@ -211,12 +231,17 @@ def train(model, config, use_wandb=True, **kwargs):
         table = wandb.Table(columns=["input", "next_tokens"])
 
     # Get dataloader based on dataset type
+    ref_tok = getattr(model, 'tokenizer', None)
     if dataset_type == 'wikitext':
-        dataloader = load_wikitext_dataset(config, batch_size=batch_size)
+        dataloader = load_wikitext_dataset(config, batch_size=batch_size, reference_tokenizer=ref_tok)
     elif dataset_type == 'tiny-stories':
-        dataloader = load_tiny_stories_dataset(config, batch_size=batch_size, reference_tokenizer=model.tokenizer)
+        dataloader = load_tiny_stories_dataset(config, batch_size=batch_size, reference_tokenizer=ref_tok)
     elif dataset_type == 'pile-10k':
-        dataloader = load_pile_10k_dataset(batch_size, config.seq_len)
+        dataloader = load_pile_10k_dataset(batch_size, config.seq_len, reference_tokenizer=ref_tok)
+    elif dataset_type in ('openwebtext', 'owt'):
+        dataloader = load_openwebtext_dataset(config, batch_size=batch_size, reference_tokenizer=ref_tok)
+    elif dataset_type == 'fineweb-edu':
+        dataloader = load_fineweb_edu_dataset(config, batch_size=batch_size, reference_tokenizer=ref_tok)
     elif dataset_type == 'sample':
         # Create a small in-memory dataset for quick testing
         tokenized_texts = generate_dataset(config.seq_len)
