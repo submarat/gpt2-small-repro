@@ -169,6 +169,8 @@ def train(model, config, use_wandb=True, **kwargs):
         weight_decay: Weight decay for optimizer (1e-2)
         max_iter_per_epoch: Maximum iterations per epoch (50)
         dataset: Dataset to use ('wikitext', 'tiny-stories', 'pile-10k', or 'sample')
+        grad_accum_steps: Micro-batches accumulated per optimizer step (1).
+            Effective batch = batch_size * grad_accum_steps sequences.
         amp: Use bf16 autocast on CUDA (True)
         tf32: Allow TF32 matmuls on CUDA (True)
         compile: Wrap the model in torch.compile (True)
@@ -182,6 +184,9 @@ def train(model, config, use_wandb=True, **kwargs):
     weight_decay = kwargs.get('weight_decay', 1e-2)
     max_iter_per_epoch = kwargs.get('max_iter_per_epoch', 50)
     dataset_type = kwargs.get('dataset', 'wikitext')
+    # Micro-batches accumulated per optimizer step. Effective batch =
+    # batch_size * grad_accum_steps sequences.
+    grad_accum_steps = max(1, int(kwargs.get('grad_accum_steps', 1)))
 
     # Optimization toggles (see OPTIMIZATION.md). Only take effect on CUDA.
     on_cuda = device.type == 'cuda'
@@ -234,37 +239,58 @@ def train(model, config, use_wandb=True, **kwargs):
     # are shared, so training updates the original model in place.
     train_model = t.compile(model) if use_compile else model
 
-    step = 0
+    print(
+        f"Effective batch: {batch_size} seqs x {grad_accum_steps} accum "
+        f"= {batch_size * grad_accum_steps} seqs "
+        f"({batch_size * grad_accum_steps * config.seq_len:,} tokens) per optimizer step"
+    )
+
+    step = 0          # optimizer steps taken
+    micro = 0         # micro-batches accumulated since the last step
+    loss_accum = 0.0  # summed full-batch loss over the current accumulation window
+    epoch_loss = float('nan')
     for epoch in tqdm(range(epochs)):
-        loss = t.ones(1)
         iterations = 0
         for batch_idx, batch_tokens in enumerate(tqdm(dataloader, desc="Batch Progress")):
-            step += 1
+            # Zero grads at the start of each accumulation window; any partial
+            # window left at an epoch boundary is discarded here (never stepped).
+            if micro == 0:
+                optimizer.zero_grad(set_to_none=True)
+
             # batch_tokens will be shape [batch_size, seq_len]
             batch_tokens = batch_tokens[0].to(device)  # Move to device
 
-            # Forward + next-token cross-entropy under bf16 autocast
+            # Forward + next-token cross-entropy under bf16 autocast.
+            # Scale by 1/grad_accum_steps so the accumulated gradient equals the
+            # mean over the full effective batch.
             with t.autocast(device_type=device.type, dtype=t.bfloat16, enabled=use_amp):
                 logits = train_model(batch_tokens)
                 loss = F.cross_entropy(
                     logits[:, :-1].reshape(-1, logits.size(-1)),
                     batch_tokens[:, 1:].reshape(-1),
-                )
+                ) / grad_accum_steps
 
-            if use_wandb:
-                wandb.log({"loss": loss}, step=step)
-
-            optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            optimizer.step()
+            loss_accum += loss.item()
+            micro += 1
+
+            # Take an optimizer step only once a full window is accumulated.
+            if micro == grad_accum_steps:
+                optimizer.step()
+                step += 1
+                micro = 0
+                epoch_loss = loss_accum  # full-batch mean loss for this step
+                if use_wandb:
+                    wandb.log({"loss": loss_accum}, step=step)
+                loss_accum = 0.0
 
             if max_iter_per_epoch and iterations > max_iter_per_epoch:
                 break
             iterations += 1
-        
-        # Log the last loss for the epoch
+
+        # Log the last full-batch loss for the epoch
         if use_wandb:
-            wandb.log({"epoch": epoch, "loss": loss.item()})
+            wandb.log({"epoch": epoch, "loss": epoch_loss})
 
             # Only log examples if we're using wandb
             if hasattr(model, 'tokenizer') and model.tokenizer is not None:
@@ -276,7 +302,7 @@ def train(model, config, use_wandb=True, **kwargs):
             decoded_batch_tokens = tokenizer.decode(batch_tokens[0])
             next_tokens = tokenizer.decode(logits[0,:].argmax(dim=-1))
             table.add_data(decoded_batch_tokens, next_tokens)
-        print(f"Epoch {epoch} loss: {loss.item()}")
+        print(f"Epoch {epoch} loss: {epoch_loss}")
 
     if use_wandb:
         wandb.log({"examples": table})

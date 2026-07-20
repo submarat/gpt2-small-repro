@@ -124,7 +124,9 @@ tag with `benchmark.py --compare <prev> <this>`. Every step must keep
 These affect a real OWT/FineWeb run but not the fixed-batch micro-benchmark, so
 they're tracked separately and validated on a short real training run:
 
-- [ ] **Gradient accumulation** — reach GPT-2's ~0.5M-token effective batch.
+- [x] **Gradient accumulation** — `train(grad_accum_steps=N)`; effective batch =
+      `batch_size * N` seqs. Loss scaled by 1/N; verified gradient-equivalent to a
+      single full batch (max diff ~4e-9).
 - [ ] **DataLoader** `num_workers`/`pin_memory` tuning; drop the spurious
       trailing `.unsqueeze(-1)` in the loss.
 - [ ] **LR schedule + gradient clipping** — cosine warmup, `clip_grad_norm_(1.0)`.
