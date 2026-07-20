@@ -158,7 +158,13 @@ they're tracked separately and validated on a short real training run:
       (canonical repo ids + lazy Arrow collate), `num_workers`/`pin_memory`
       enabled; added OpenWebText and FineWeb-Edu loaders. Spurious trailing
       `.unsqueeze(-1)` removed by switching to `F.cross_entropy`.
-- [ ] **LR schedule + gradient clipping** — cosine warmup, `clip_grad_norm_(1.0)`.
+- [x] **LR schedule + gradient clipping** — cosine decay with linear warmup
+      (`cosine_lr`), `clip_grad_norm_(1.0)`, AdamW (0.9, 0.95) with the >=2D-only
+      weight-decay split (`configure_optimizer`).
+- [x] **Step-driven pretraining loop** — token-budget (`max_steps`) stopping,
+      periodic validation (`estimate_loss`), checkpointing (`save_checkpoint`),
+      and W&B logging of loss/lr/grad_norm/tokens_per_sec. Entry point:
+      `demos/train_gpt2_fineweb.py` (10B FineWeb-Edu by default).
 
 ## How each step is recorded
 
