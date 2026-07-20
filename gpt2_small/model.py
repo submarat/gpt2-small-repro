@@ -24,6 +24,13 @@ class TransformerConfig:
     d_mlp: int = 3072
     n_heads: int = 12
     n_layers: int = 12
+    # Use fused scaled_dot_product_attention instead of the hand-rolled
+    # einsum+softmax path. Faster and lower-memory, but does not expose
+    # attention probabilities (forward returns None for them).
+    use_sdpa: bool = True
+    # Tie the unembedding weight to the (transposed) embedding weight.
+    # Matches GPT-2 and drops ~38M params.
+    tie_weights: bool = True
 
 class MultiHeadAttention(nn.Module):
     """Multi-head self-attention module."""
@@ -37,7 +44,8 @@ class MultiHeadAttention(nn.Module):
 
         self.seq_len = config.seq_len
         self.d_head = config.d_head
-        
+        self.use_sdpa = config.use_sdpa
+
         # Query projection matrix
         self.W_Q = nn.Parameter(t.empty(config.n_heads, config.d_model, config.d_head, device=device))
         nn.init.normal_(self.W_Q, std=config.init_range)
@@ -72,12 +80,26 @@ class MultiHeadAttention(nn.Module):
         seq_len = x.shape[-2]
         d_head = self.d_head
 
-        causal_mask = t.triu(t.ones(seq_len, seq_len, dtype=bool, device=device), diagonal=1)
-
         # Project input into Q, K, V using einops
         queries = einops.einsum(x, self.W_Q, 'batch seq d_model, n_heads d_model d_head -> batch seq n_heads d_head') + self.b_Q
         keys = einops.einsum(x, self.W_K, 'batch seq d_model, n_heads d_model d_head -> batch seq n_heads d_head') + self.b_K
         values = einops.einsum(x, self.W_V, 'batch seq d_model, n_heads d_model d_head -> batch seq n_heads d_head') + self.b_V
+
+        if self.use_sdpa:
+            # Fused (flash-capable) attention. SDPA expects (batch, n_heads, seq, d_head)
+            # and applies the causal mask + softmax internally; it does not return probs.
+            q = queries.transpose(1, 2)
+            k = keys.transpose(1, 2)
+            v = values.transpose(1, 2)
+            attn = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+            outputs = attn.transpose(1, 2)  # -> batch seq n_heads d_head
+            out = einops.einsum(
+                outputs, self.W_O,
+                'batch seq n_heads d_head, n_heads d_head d_model -> batch seq d_model'
+            ) + self.b_O
+            return None, out
+
+        causal_mask = t.triu(t.ones(seq_len, seq_len, dtype=bool, device=device), diagonal=1)
 
         # Calculate attention scores and apply scaling
         attn_scores = einops.einsum(
@@ -263,17 +285,23 @@ class Unembedding(nn.Module):
         nn.init.normal_(self.W_U, std=config.init_range)
 
         self.b_U = nn.Parameter(t.zeros((config.vocab,), device=device, requires_grad=False))
-    
+        # When True, W_U is the shared embedding weight of shape (vocab, d_model)
+        # (i.e. W_E) and must be used transposed. Set by Transformer when tying.
+        self.tied = False
+
     def forward(self, x: Float[Tensor, 'batch seq d_model']) -> Float[Tensor, 'batch seq vocab']:
         """
         Forward pass for the unembedding layer.
-        
+
         Args:
             x: Input tensor of shape (batch, seq, d_model)
-            
+
         Returns:
             Logits tensor of shape (batch, seq, vocab)
         """
+        if self.tied:
+            # W_U is the shared (vocab, d_model) embedding weight.
+            return einops.einsum(x, self.W_U, 'batch seq d_model, vocab d_model -> batch seq vocab') + self.b_U
         return einops.einsum(x, self.W_U, 'batch seq d_model, d_model vocab -> batch seq vocab') + self.b_U
 
 class Transformer(nn.Module):
@@ -292,7 +320,14 @@ class Transformer(nn.Module):
 
         self.ln_final = LayerNorm(config)
         self.unembed = Unembedding(config)
-    
+
+        if config.tie_weights:
+            # Share one table: the unembedding uses the (vocab, d_model) embedding
+            # weight transposed. nn.Module.parameters() dedupes the shared tensor,
+            # so the param count drops by vocab*d_model and grads accumulate into it.
+            self.unembed.W_U = self.embed.W_E
+            self.unembed.tied = True
+
     def forward(self, tokens: Int[Tensor, 'batch seq']) -> Float[Tensor, 'batch seq vocab']:
         """
         Forward pass for the transformer.

@@ -1,0 +1,40 @@
+{
+  "tag": "sdpa",
+  "device": "cuda",
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "dtype": "bf16",
+  "compile": false,
+  "tf32": true,
+  "sdpa": true,
+  "fused_adam": false,
+  "xent": false,
+  "tie": false,
+  "config": {
+    "d_model": 768,
+    "n_heads": 12,
+    "n_layers": 12,
+    "d_mlp": 3072,
+    "seq_len": 1024,
+    "vocab": 50257
+  },
+  "batch": 8,
+  "n_params": 163087441,
+  "warmup": 5,
+  "iters": 20,
+  "phases": {
+    "train": {
+      "phase": "train",
+      "step_ms_median": 76.5181920141913,
+      "step_ms_min": 76.20220293756574,
+      "tokens_per_sec": 107059.50812952672,
+      "peak_mem_gb": 13.828215808
+    },
+    "eval": {
+      "phase": "eval",
+      "step_ms_median": 22.36526651540771,
+      "step_ms_min": 22.278967895545065,
+      "tokens_per_sec": 366282.24369052023,
+      "peak_mem_gb": 5.537144832
+    }
+  }
+}

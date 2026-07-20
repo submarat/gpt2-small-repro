@@ -1,0 +1,40 @@
+{
+  "tag": "xent",
+  "device": "cuda",
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "dtype": "bf16",
+  "compile": true,
+  "tf32": true,
+  "sdpa": true,
+  "fused_adam": true,
+  "xent": true,
+  "tie": false,
+  "config": {
+    "d_model": 768,
+    "n_heads": 12,
+    "n_layers": 12,
+    "d_mlp": 3072,
+    "seq_len": 1024,
+    "vocab": 50257
+  },
+  "batch": 8,
+  "n_params": 163087441,
+  "warmup": 5,
+  "iters": 20,
+  "phases": {
+    "train": {
+      "phase": "train",
+      "step_ms_median": 45.808250026311725,
+      "step_ms_min": 45.704969903454185,
+      "tokens_per_sec": 178832.41545561358,
+      "peak_mem_gb": 11.681126912
+    },
+    "eval": {
+      "phase": "eval",
+      "step_ms_median": 10.989751957822591,
+      "step_ms_min": 10.938099003396928,
+      "tokens_per_sec": 745421.7375824274,
+      "peak_mem_gb": 5.203694592
+    }
+  }
+}
