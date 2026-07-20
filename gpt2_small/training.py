@@ -6,6 +6,7 @@ including data loading and processing.
 """
 
 import torch as t
+import torch.nn.functional as F
 import wandb
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -168,8 +169,12 @@ def train(model, config, use_wandb=True, **kwargs):
         weight_decay: Weight decay for optimizer (1e-2)
         max_iter_per_epoch: Maximum iterations per epoch (50)
         dataset: Dataset to use ('wikitext', 'tiny-stories', 'pile-10k', or 'sample')
+        amp: Use bf16 autocast on CUDA (True)
+        tf32: Allow TF32 matmuls on CUDA (True)
+        compile: Wrap the model in torch.compile (True)
+        fused_optim: Use fused AdamW on CUDA (True on CUDA)
     """
-    
+
     # Hyperparameters with defaults
     lr = kwargs.get('lr', 1e-3)
     epochs = kwargs.get('epochs', 50)
@@ -177,6 +182,16 @@ def train(model, config, use_wandb=True, **kwargs):
     weight_decay = kwargs.get('weight_decay', 1e-2)
     max_iter_per_epoch = kwargs.get('max_iter_per_epoch', 50)
     dataset_type = kwargs.get('dataset', 'wikitext')
+
+    # Optimization toggles (see OPTIMIZATION.md). Only take effect on CUDA.
+    on_cuda = device.type == 'cuda'
+    use_amp = kwargs.get('amp', True) and on_cuda
+    use_tf32 = kwargs.get('tf32', True) and on_cuda
+    use_compile = kwargs.get('compile', True)
+    use_fused_optim = kwargs.get('fused_optim', True) and on_cuda
+
+    if use_tf32:
+        t.set_float32_matmul_precision('high')
 
     # Initialize wandb if requested
     if use_wandb:
@@ -210,7 +225,14 @@ def train(model, config, use_wandb=True, **kwargs):
     else:
         raise ValueError(f"Unknown dataset type: {dataset_type}")
 
-    optimizer = t.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    optimizer = t.optim.AdamW(
+        model.parameters(), lr=lr, weight_decay=weight_decay, fused=use_fused_optim
+    )
+
+    # Compile the model for the training loop; keep `model` (uncompiled) for
+    # attribute access (tokenizer/config) and as the returned handle. Weights
+    # are shared, so training updates the original model in place.
+    train_model = t.compile(model) if use_compile else model
 
     step = 0
     for epoch in tqdm(range(epochs)):
@@ -221,17 +243,18 @@ def train(model, config, use_wandb=True, **kwargs):
             # batch_tokens will be shape [batch_size, seq_len]
             batch_tokens = batch_tokens[0].to(device)  # Move to device
 
-            # Calculate loss
-            logits = model(batch_tokens)
-            log_probs = logits.log_softmax(dim=-1)
-            log_probs_for_tokens = log_probs[:, :-1]\
-                .gather(dim=-1, index=batch_tokens[:, 1:].unsqueeze(-1)).unsqueeze(-1)
-            loss = -log_probs_for_tokens.mean()
+            # Forward + next-token cross-entropy under bf16 autocast
+            with t.autocast(device_type=device.type, dtype=t.bfloat16, enabled=use_amp):
+                logits = train_model(batch_tokens)
+                loss = F.cross_entropy(
+                    logits[:, :-1].reshape(-1, logits.size(-1)),
+                    batch_tokens[:, 1:].reshape(-1),
+                )
 
             if use_wandb:
                 wandb.log({"loss": loss}, step=step)
 
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
 
