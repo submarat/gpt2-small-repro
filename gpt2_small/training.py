@@ -5,6 +5,11 @@ This module provides functions for training the transformer model,
 including data loading and processing.
 """
 
+import dataclasses
+import math
+import os
+import time
+
 import torch as t
 import torch.nn.functional as F
 import wandb
@@ -172,6 +177,87 @@ def load_fineweb_edu_dataset(config: TransformerConfig, batch_size: int = 64, re
     )
 
 
+def cosine_lr(step: int, warmup_steps: int, max_steps: int, max_lr: float, min_lr: float) -> float:
+    """Linear warmup for `warmup_steps`, then cosine decay from max_lr to min_lr.
+
+    This is the standard GPT-2 / nanoGPT schedule: LR ramps up linearly to avoid
+    early instability, then decays smoothly, spending most of the budget at a
+    gradually shrinking rate.
+    """
+    if step < warmup_steps:
+        return max_lr * (step + 1) / max(1, warmup_steps)
+    if step >= max_steps:
+        return min_lr
+    ratio = (step - warmup_steps) / max(1, max_steps - warmup_steps)
+    coeff = 0.5 * (1.0 + math.cos(math.pi * ratio))  # 1 -> 0
+    return min_lr + coeff * (max_lr - min_lr)
+
+
+def configure_optimizer(model, lr, weight_decay, betas, fused):
+    """AdamW with decoupled weight decay applied only to >=2D tensors.
+
+    Matmul and embedding weights (>=2D) are regularized; biases and LayerNorm
+    gains (1D) are not - the standard GPT-2 split. Tied weights appear once
+    because nn.Module.parameters() dedupes shared tensors.
+    """
+    decay, no_decay = [], []
+    for p in model.parameters():
+        if not p.requires_grad:
+            continue
+        (decay if p.dim() >= 2 else no_decay).append(p)
+    groups = [
+        {"params": decay, "weight_decay": weight_decay},
+        {"params": no_decay, "weight_decay": 0.0},
+    ]
+    n_decay = sum(p.numel() for p in decay)
+    n_no_decay = sum(p.numel() for p in no_decay)
+    print(f"Optimizer: {n_decay:,} params decayed / {n_no_decay:,} not decayed")
+    return t.optim.AdamW(groups, lr=lr, betas=betas, fused=fused)
+
+
+@t.no_grad()
+def estimate_loss(fwd_model, val_dataloader, eval_iters, use_amp):
+    """Mean next-token cross-entropy over `eval_iters` validation batches."""
+    losses = []
+    it = iter(val_dataloader)
+    for _ in range(eval_iters):
+        try:
+            batch = next(it)
+        except StopIteration:
+            it = iter(val_dataloader)
+            batch = next(it)
+        toks = batch[0].to(device)
+        with t.autocast(device_type=device.type, dtype=t.bfloat16, enabled=use_amp):
+            logits = fwd_model(toks)
+            loss = F.cross_entropy(
+                logits[:, :-1].reshape(-1, logits.size(-1)),
+                toks[:, 1:].reshape(-1),
+            )
+        losses.append(loss.item())
+    return sum(losses) / max(1, len(losses))
+
+
+def save_checkpoint(path, model, optimizer, step, config):
+    """Save the (uncompiled) model + optimizer state and metadata."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    t.save(
+        {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "step": step,
+            "config": dataclasses.asdict(config),
+        },
+        path,
+    )
+
+
+def _infinite(dataloader):
+    """Yield batches forever, cycling the dataloader across epochs."""
+    while True:
+        for batch in dataloader:
+            yield batch
+
+
 def train(model, config, use_wandb=True, **kwargs):
     """
     Train the model using the specified dataset.
@@ -183,54 +269,61 @@ def train(model, config, use_wandb=True, **kwargs):
         **kwargs: Additional training parameters
         
     Training parameters (with defaults):
-        lr: Learning rate (1e-3)
-        epochs: Number of epochs (50)
-        batch_size: Batch size (64)
-        weight_decay: Weight decay for optimizer (1e-2)
-        max_iter_per_epoch: Maximum iterations per epoch (50)
-        dataset: Dataset to use ('wikitext', 'tiny-stories', 'pile-10k', or 'sample')
-        grad_accum_steps: Micro-batches accumulated per optimizer step (1).
-            Effective batch = batch_size * grad_accum_steps sequences.
-        amp: Use bf16 autocast on CUDA (True)
-        tf32: Allow TF32 matmuls on CUDA (True)
-        compile: Wrap the model in torch.compile (True)
-        fused_optim: Use fused AdamW on CUDA (True on CUDA)
+        lr: Peak learning rate after warmup (6e-4)
+        min_lr: Final learning rate after cosine decay (lr/10)
+        warmup_steps: Linear-warmup optimizer steps (100)
+        max_steps: Total optimizer steps. If None, derived from epochs/
+            max_iter_per_epoch (token-budget runs set this directly).
+        epochs: Fallback number of epochs when max_steps is None (1)
+        max_iter_per_epoch: Fallback per-epoch step cap when max_steps is None
+        batch_size: Micro-batch size in sequences (64)
+        grad_accum_steps: Micro-batches per optimizer step (1). Effective batch
+            = batch_size * grad_accum_steps sequences.
+        weight_decay: Decoupled weight decay on >=2D params (0.1)
+        betas: AdamW betas ((0.9, 0.95))
+        max_grad_norm: Gradient-norm clip value; 0 disables (1.0)
+        dataset: 'wikitext'|'tiny-stories'|'pile-10k'|'openwebtext'|
+            'fineweb-edu'|'sample'
+        val_dataloader: Optional DataLoader of (tokens,) batches for val loss
+        val_every: Steps between validation evals; 0 disables (0)
+        eval_iters: Batches per validation eval (20)
+        checkpoint_dir: If set, save checkpoints here
+        checkpoint_every: Steps between checkpoints (0 disables)
+        log_every: Steps between console/wandb metric logs (10)
+        amp/tf32/compile/fused_optim: optimization toggles (True on CUDA)
     """
 
-    # Hyperparameters with defaults
-    lr = kwargs.get('lr', 1e-3)
-    epochs = kwargs.get('epochs', 50)
+    # --- hyperparameters -------------------------------------------------
+    lr = kwargs.get('lr', 6e-4)
+    min_lr = kwargs.get('min_lr', lr / 10)
+    warmup_steps = int(kwargs.get('warmup_steps', 100))
+    max_steps = kwargs.get('max_steps', None)
+    epochs = kwargs.get('epochs', 1)
+    max_iter_per_epoch = kwargs.get('max_iter_per_epoch', None)
     batch_size = kwargs.get('batch_size', 64)
-    weight_decay = kwargs.get('weight_decay', 1e-2)
-    max_iter_per_epoch = kwargs.get('max_iter_per_epoch', 50)
-    dataset_type = kwargs.get('dataset', 'wikitext')
-    # Micro-batches accumulated per optimizer step. Effective batch =
-    # batch_size * grad_accum_steps sequences.
     grad_accum_steps = max(1, int(kwargs.get('grad_accum_steps', 1)))
+    weight_decay = kwargs.get('weight_decay', 0.1)
+    betas = tuple(kwargs.get('betas', (0.9, 0.95)))
+    max_grad_norm = kwargs.get('max_grad_norm', 1.0)
+    dataset_type = kwargs.get('dataset', 'wikitext')
 
-    # Optimization toggles (see OPTIMIZATION.md). Only take effect on CUDA.
+    val_dataloader = kwargs.get('val_dataloader', None)
+    val_every = int(kwargs.get('val_every', 0))
+    eval_iters = int(kwargs.get('eval_iters', 20))
+    checkpoint_dir = kwargs.get('checkpoint_dir', None)
+    checkpoint_every = int(kwargs.get('checkpoint_every', 0))
+    log_every = max(1, int(kwargs.get('log_every', 10)))
+
+    # optimization toggles (CUDA-only)
     on_cuda = device.type == 'cuda'
     use_amp = kwargs.get('amp', True) and on_cuda
     use_tf32 = kwargs.get('tf32', True) and on_cuda
     use_compile = kwargs.get('compile', True)
     use_fused_optim = kwargs.get('fused_optim', True) and on_cuda
-
     if use_tf32:
         t.set_float32_matmul_precision('high')
 
-    # Initialize wandb if requested
-    if use_wandb:
-        wandb.init(project="transformer_training", config={
-            "learning_rate": lr,
-            "epochs": epochs,
-            "batch_size": batch_size,
-            "weight_decay": weight_decay,
-            "max_iter_per_epoch": max_iter_per_epoch,
-            "dataset": dataset_type
-        })
-        table = wandb.Table(columns=["input", "next_tokens"])
-
-    # Get dataloader based on dataset type
+    # --- data ------------------------------------------------------------
     ref_tok = getattr(model, 'tokenizer', None)
     if dataset_type == 'wikitext':
         dataloader = load_wikitext_dataset(config, batch_size=batch_size, reference_tokenizer=ref_tok)
@@ -243,94 +336,119 @@ def train(model, config, use_wandb=True, **kwargs):
     elif dataset_type == 'fineweb-edu':
         dataloader = load_fineweb_edu_dataset(config, batch_size=batch_size, reference_tokenizer=ref_tok)
     elif dataset_type == 'sample':
-        # Create a small in-memory dataset for quick testing
         tokenized_texts = generate_dataset(config.seq_len)
-        # Extract just the input_ids from each tokenized text
         tokens = [text['input_ids'] for text in tokenized_texts]
-        # Stack them into a tensor
         tokens_tensor = t.cat(tokens, dim=0)
-        # Create a simple dataset and dataloader
         simple_dataset = t.utils.data.TensorDataset(tokens_tensor)
-        dataloader = DataLoader(simple_dataset, batch_size=batch_size, shuffle=True)
+        dataloader = DataLoader(simple_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
     else:
         raise ValueError(f"Unknown dataset type: {dataset_type}")
 
-    optimizer = t.optim.AdamW(
-        model.parameters(), lr=lr, weight_decay=weight_decay, fused=use_fused_optim
-    )
+    # Resolve the total optimizer-step budget.
+    if max_steps is None:
+        try:
+            steps_per_epoch = max(1, len(dataloader) // grad_accum_steps)
+        except TypeError:
+            steps_per_epoch = 1
+        if max_iter_per_epoch:
+            steps_per_epoch = min(steps_per_epoch, int(max_iter_per_epoch))
+        max_steps = epochs * steps_per_epoch
+    max_steps = max(1, int(max_steps))
+    warmup_steps = min(warmup_steps, max_steps)
 
-    # Compile the model for the training loop; keep `model` (uncompiled) for
-    # attribute access (tokenizer/config) and as the returned handle. Weights
-    # are shared, so training updates the original model in place.
+    # --- optimizer + compile --------------------------------------------
+    optimizer = configure_optimizer(model, lr, weight_decay, betas, use_fused_optim)
+    # Compile for the loop; keep `model` (uncompiled) for state_dict / attrs.
     train_model = t.compile(model) if use_compile else model
 
+    tokens_per_step = batch_size * grad_accum_steps * config.seq_len
     print(
-        f"Effective batch: {batch_size} seqs x {grad_accum_steps} accum "
-        f"= {batch_size * grad_accum_steps} seqs "
-        f"({batch_size * grad_accum_steps * config.seq_len:,} tokens) per optimizer step"
+        f"Effective batch: {batch_size} x {grad_accum_steps} accum = "
+        f"{batch_size * grad_accum_steps} seqs ({tokens_per_step:,} tokens)/step | "
+        f"max_steps={max_steps:,} (~{max_steps * tokens_per_step / 1e9:.2f}B tokens) | "
+        f"warmup={warmup_steps} | peak_lr={lr:g} min_lr={min_lr:g}"
     )
 
-    step = 0          # optimizer steps taken
-    micro = 0         # micro-batches accumulated since the last step
-    loss_accum = 0.0  # summed full-batch loss over the current accumulation window
-    epoch_loss = float('nan')
-    for epoch in tqdm(range(epochs)):
-        iterations = 0
-        for batch_idx, batch_tokens in enumerate(tqdm(dataloader, desc="Batch Progress")):
-            # Zero grads at the start of each accumulation window; any partial
-            # window left at an epoch boundary is discarded here (never stepped).
-            if micro == 0:
-                optimizer.zero_grad(set_to_none=True)
+    if use_wandb:
+        wandb.init(project="gpt2-small-repro", config={
+            "dataset": dataset_type, "peak_lr": lr, "min_lr": min_lr,
+            "warmup_steps": warmup_steps, "max_steps": max_steps,
+            "batch_size": batch_size, "grad_accum_steps": grad_accum_steps,
+            "tokens_per_step": tokens_per_step, "weight_decay": weight_decay,
+            "betas": betas, "max_grad_norm": max_grad_norm, "seq_len": config.seq_len,
+            "n_params": sum(p.numel() for p in model.parameters()),
+        })
 
-            # batch_tokens will be shape [batch_size, seq_len]
-            batch_tokens = batch_tokens[0].to(device)  # Move to device
+    # --- training loop (step-driven) ------------------------------------
+    data = _infinite(dataloader)
+    if on_cuda:
+        t.cuda.synchronize()
+    t_log = time.perf_counter()
+    tokens_since_log = 0
 
-            # Forward + next-token cross-entropy under bf16 autocast.
-            # Scale by 1/grad_accum_steps so the accumulated gradient equals the
-            # mean over the full effective batch.
+    for step in tqdm(range(1, max_steps + 1), desc="steps"):
+        optimizer.zero_grad(set_to_none=True)
+
+        # Accumulate grads over grad_accum_steps micro-batches. Loss is scaled
+        # by 1/grad_accum_steps so the total gradient is the mean over the
+        # full effective batch.
+        loss_accum = 0.0
+        for _ in range(grad_accum_steps):
+            batch_tokens = next(data)[0].to(device, non_blocking=True)
             with t.autocast(device_type=device.type, dtype=t.bfloat16, enabled=use_amp):
                 logits = train_model(batch_tokens)
                 loss = F.cross_entropy(
                     logits[:, :-1].reshape(-1, logits.size(-1)),
                     batch_tokens[:, 1:].reshape(-1),
                 ) / grad_accum_steps
-
             loss.backward()
             loss_accum += loss.item()
-            micro += 1
+        tokens_since_log += tokens_per_step
 
-            # Take an optimizer step only once a full window is accumulated.
-            if micro == grad_accum_steps:
-                optimizer.step()
-                step += 1
-                micro = 0
-                epoch_loss = loss_accum  # full-batch mean loss for this step
-                if use_wandb:
-                    wandb.log({"loss": loss_accum}, step=step)
-                loss_accum = 0.0
+        # Clip, then set this step's LR from the cosine schedule.
+        grad_norm = 0.0
+        if max_grad_norm and max_grad_norm > 0:
+            grad_norm = t.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm).item()
+        lr_now = cosine_lr(step, warmup_steps, max_steps, lr, min_lr)
+        for group in optimizer.param_groups:
+            group['lr'] = lr_now
+        optimizer.step()
 
-            if max_iter_per_epoch and iterations > max_iter_per_epoch:
-                break
-            iterations += 1
+        # --- metrics ---
+        if step % log_every == 0 or step == 1:
+            if on_cuda:
+                t.cuda.synchronize()
+            dt = time.perf_counter() - t_log
+            tps = tokens_since_log / dt if dt > 0 else 0.0
+            print(f"step {step:>6}/{max_steps} | loss {loss_accum:.4f} | lr {lr_now:.2e} "
+                  f"| grad_norm {grad_norm:.2f} | {tps:,.0f} tok/s")
+            if use_wandb:
+                wandb.log({"train/loss": loss_accum, "lr": lr_now,
+                           "grad_norm": grad_norm, "tokens_per_sec": tps,
+                           "tokens": step * tokens_per_step}, step=step)
+            t_log = time.perf_counter()
+            tokens_since_log = 0
 
-        # Log the last full-batch loss for the epoch
-        if use_wandb:
-            wandb.log({"epoch": epoch, "loss": epoch_loss})
+        # --- validation ---
+        if val_dataloader is not None and val_every and step % val_every == 0:
+            val_loss = estimate_loss(train_model, val_dataloader, eval_iters, use_amp)
+            print(f"  [val] step {step}: loss {val_loss:.4f}")
+            if use_wandb:
+                wandb.log({"val/loss": val_loss}, step=step)
+            t_log = time.perf_counter()  # exclude eval time from throughput
+            tokens_since_log = 0
 
-            # Only log examples if we're using wandb
-            if hasattr(model, 'tokenizer') and model.tokenizer is not None:
-                tokenizer = model.tokenizer
-            else:
-                tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
-                
-            # Decode the final batch_tokens and logits
-            decoded_batch_tokens = tokenizer.decode(batch_tokens[0])
-            next_tokens = tokenizer.decode(logits[0,:].argmax(dim=-1))
-            table.add_data(decoded_batch_tokens, next_tokens)
-        print(f"Epoch {epoch} loss: {epoch_loss}")
+        # --- checkpoint ---
+        if checkpoint_dir and checkpoint_every and step % checkpoint_every == 0:
+            path = os.path.join(checkpoint_dir, f"ckpt_{step:07d}.pt")
+            save_checkpoint(path, model, optimizer, step, config)
+            print(f"  [ckpt] saved {path}")
+            t_log = time.perf_counter()
+            tokens_since_log = 0
 
+    if checkpoint_dir:
+        save_checkpoint(os.path.join(checkpoint_dir, "ckpt_final.pt"), model, optimizer, max_steps, config)
     if use_wandb:
-        wandb.log({"examples": table})
         wandb.finish()
 
-    return model 
+    return model
