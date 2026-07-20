@@ -32,7 +32,7 @@ import torch as t
 
 from gpt2_small import Transformer, TransformerConfig, device
 
-DEFAULT_TASKS = "hellaswag,lambada_openai,winogrande,piqa,arc_easy,sciq"
+DEFAULT_TASKS = "hellaswag,lambada_openai,piqa,arc_easy,sciq,wikitext"
 
 
 def _load_our_model(checkpoint=None):
@@ -155,7 +155,7 @@ def parse_results(out_path):
     out = {}
     for task, metrics in data.get("results", {}).items():
         # Prefer acc_norm, fall back to acc / perplexity.
-        for key in ("acc_norm,none", "acc,none", "perplexity,none"):
+        for key in ("acc_norm,none", "acc,none", "word_perplexity,none", "perplexity,none"):
             if key in metrics:
                 out[task] = (key.split(",")[0], metrics[key])
                 break
@@ -171,27 +171,32 @@ def main():
     ap.add_argument("--limit", type=int, default=None, help="cap examples/task (quick runs)")
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--skip-gpt2", action="store_true", help="don't also eval public gpt2")
+    ap.add_argument("--gpt2-only", action="store_true", help="eval only public gpt2 (no checkpoint needed)")
     ap.add_argument("--verify-only", action="store_true", help="only run the converter numeric check")
     args = ap.parse_args()
 
-    verify_conversion()
     if args.verify_only:
+        verify_conversion()
         return
 
     os.makedirs(args.out_dir, exist_ok=True)
-    # Convert our checkpoint to a HF model dir.
-    model, cfg = _load_our_model(args.checkpoint)
-    hf = convert_to_hf(model, cfg)
-    hf_dir = os.path.join(args.out_dir, "hf_model")
-    hf.save_pretrained(hf_dir)
-    from transformers import GPT2TokenizerFast
-    GPT2TokenizerFast.from_pretrained("gpt2").save_pretrained(hf_dir)
-    print(f"Saved converted HF model -> {hf_dir}")
+    results = {}
 
-    ours_out = os.path.join(args.out_dir, "results_ours")
-    run_lm_eval(f"pretrained={hf_dir},dtype=bfloat16", args.tasks, ours_out,
-                args.batch_size, args.limit, args.device)
-    results = {"ours (trained)": parse_results(ours_out)}
+    if not args.gpt2_only:
+        # Sanity-check the converter, then convert our checkpoint to a HF model dir.
+        verify_conversion()
+        model, cfg = _load_our_model(args.checkpoint)
+        hf = convert_to_hf(model, cfg)
+        hf_dir = os.path.join(args.out_dir, "hf_model")
+        hf.save_pretrained(hf_dir)
+        from transformers import GPT2TokenizerFast
+        GPT2TokenizerFast.from_pretrained("gpt2").save_pretrained(hf_dir)
+        print(f"Saved converted HF model -> {hf_dir}")
+
+        ours_out = os.path.join(args.out_dir, "results_ours")
+        run_lm_eval(f"pretrained={hf_dir},dtype=bfloat16", args.tasks, ours_out,
+                    args.batch_size, args.limit, args.device)
+        results["ours (trained)"] = parse_results(ours_out)
 
     if not args.skip_gpt2:
         gpt2_out = os.path.join(args.out_dir, "results_gpt2")
