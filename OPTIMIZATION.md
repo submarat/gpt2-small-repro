@@ -119,6 +119,33 @@ tag with `benchmark.py --compare <prev> <this>`. Every step must keep
 | 6 | `xent` | replace manual `log_softmax`+`gather` with `F.cross_entropy` | `training.py` + benchmark loss | fused, stabler, slightly faster train step | ✅ |
 | 7 | `tied` | tie `W_U = W_E.T` (share one table) | `model.py` Embedding/Unembedding | −38M params (163M→~124M), matches GPT-2, lower mem | ✅ |
 
+## End-to-end training throughput (fully optimized)
+
+Batch sweep of the fully-optimized model (`benchmark.py`, bf16+sdpa+compile+
+fused_adam+xent+tie). Throughput plateaus ~200K tok/s (compute-bound); memory
+scales ~linearly. **batch 32 (~39 GB)** is the sweet spot on 80 GB.
+
+| micro-batch | train tok/s | peak mem (GB) |
+|---|---|---|
+| 8  | 178,543 | 11.21 |
+| 16 | 192,985 | 20.48 |
+| 32 | 201,041 | 39.11 |
+| 48 | 205,115 | 57.74 |
+
+Real end-to-end run on WikiText-2 (`benchmarks/train_throughput.py`), full
+`train()` path incl. gradient accumulation, batch 32 × accum 16 = **524,288
+tokens/opt-step** (GPT-2's batch), measured over 10 steps after warmup:
+
+| metric | value |
+|---|---|
+| tokens/sec | **202,295** (matches synthetic → dataloader overhead negligible) |
+| sec / opt-step (524K tok) | 2.59 |
+| peak mem | 39.6 GB |
+| params | 124.5M (tied) |
+
+**Projected single-H100 wall-clock:** ~12.4 h per 9B-token epoch (OWT);
+~17 days for a 300B-token GPT-2-grade run.
+
 ### Training-loop items (correctness/scale, not micro-benchmarked here)
 
 These affect a real OWT/FineWeb run but not the fixed-batch micro-benchmark, so
