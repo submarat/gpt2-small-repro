@@ -154,8 +154,10 @@ they're tracked separately and validated on a short real training run:
 - [x] **Gradient accumulation** — `train(grad_accum_steps=N)`; effective batch =
       `batch_size * N` seqs. Loss scaled by 1/N; verified gradient-equivalent to a
       single full batch (max diff ~4e-9).
-- [ ] **DataLoader** `num_workers`/`pin_memory` tuning; drop the spurious
-      trailing `.unsqueeze(-1)` in the loss.
+- [x] **DataLoader** — fixed loaders for newer datasets/huggingface_hub
+      (canonical repo ids + lazy Arrow collate), `num_workers`/`pin_memory`
+      enabled; added OpenWebText and FineWeb-Edu loaders. Spurious trailing
+      `.unsqueeze(-1)` removed by switching to `F.cross_entropy`.
 - [ ] **LR schedule + gradient clipping** — cosine warmup, `clip_grad_norm_(1.0)`.
 
 ## How each step is recorded
