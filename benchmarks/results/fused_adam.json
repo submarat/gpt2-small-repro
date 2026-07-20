@@ -1,0 +1,40 @@
+{
+  "tag": "fused_adam",
+  "device": "cuda",
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "dtype": "bf16",
+  "compile": true,
+  "tf32": true,
+  "sdpa": true,
+  "fused_adam": true,
+  "xent": false,
+  "tie": false,
+  "config": {
+    "d_model": 768,
+    "n_heads": 12,
+    "n_layers": 12,
+    "d_mlp": 3072,
+    "seq_len": 1024,
+    "vocab": 50257
+  },
+  "batch": 8,
+  "n_params": 163087441,
+  "warmup": 5,
+  "iters": 20,
+  "phases": {
+    "train": {
+      "phase": "train",
+      "step_ms_median": 44.319659064058214,
+      "step_ms_min": 44.25014101434499,
+      "tokens_per_sec": 184838.96701821522,
+      "peak_mem_gb": 11.685951488
+    },
+    "eval": {
+      "phase": "eval",
+      "step_ms_median": 10.91087848180905,
+      "step_ms_min": 10.860715992748737,
+      "tokens_per_sec": 750810.3049317205,
+      "peak_mem_gb": 5.203694592
+    }
+  }
+}

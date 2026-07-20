@@ -1,0 +1,40 @@
+{
+  "tag": "bf16",
+  "device": "cuda",
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "dtype": "bf16",
+  "compile": false,
+  "tf32": true,
+  "sdpa": false,
+  "fused_adam": false,
+  "xent": false,
+  "tie": false,
+  "config": {
+    "d_model": 768,
+    "n_heads": 12,
+    "n_layers": 12,
+    "d_mlp": 3072,
+    "seq_len": 1024,
+    "vocab": 50257
+  },
+  "batch": 8,
+  "n_params": 163087441,
+  "warmup": 5,
+  "iters": 20,
+  "phases": {
+    "train": {
+      "phase": "train",
+      "step_ms_median": 116.89628049498424,
+      "step_ms_min": 116.68381304480135,
+      "tokens_per_sec": 70079.21864846248,
+      "peak_mem_gb": 21.067532288
+    },
+    "eval": {
+      "phase": "eval",
+      "step_ms_median": 39.07656000228599,
+      "step_ms_min": 39.04914308805019,
+      "tokens_per_sec": 209639.7430971602,
+      "peak_mem_gb": 5.518078464
+    }
+  }
+}

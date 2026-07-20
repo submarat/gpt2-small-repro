@@ -21,7 +21,9 @@ from gpt2_small import (
 
 def test_mha():
     """Test the multi-head attention module."""
-    config = TransformerConfig(seq_len=10, d_model=16, d_head=8, n_heads=2)
+    # Use the explicit einsum path so we can inspect attention probabilities
+    # (the fused SDPA path does not expose them).
+    config = TransformerConfig(seq_len=10, d_model=16, d_head=8, n_heads=2, use_sdpa=False)
     mha = MultiHeadAttention(config)
 
     # Test 1: Check output shapes
@@ -44,6 +46,15 @@ def test_mha():
             if k_pos > q_pos:  # Future positions should have 0 attention
                 assert t.allclose(test_attn_probs[..., q_pos, k_pos], t.zeros_like(test_attn_probs[..., q_pos, k_pos])), \
                     f"Non-causal attention at position q={q_pos}, k={k_pos}"
+
+    # Test 4: SDPA path produces the same output as the einsum path
+    sdpa_config = TransformerConfig(seq_len=10, d_model=16, d_head=8, n_heads=2, use_sdpa=True)
+    sdpa_mha = MultiHeadAttention(sdpa_config)
+    # Copy weights so both paths compute the same function
+    sdpa_mha.load_state_dict(mha.state_dict())
+    sdpa_probs, sdpa_out = sdpa_mha(test_input)
+    assert sdpa_probs is None, "SDPA path should not return attention probs"
+    assert t.allclose(sdpa_out, test_out, atol=1e-5), "SDPA output differs from einsum output"
 
     print("All tests passed!")
 
