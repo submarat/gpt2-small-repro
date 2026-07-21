@@ -84,6 +84,30 @@ Note: the sweep uses `--limit 2000` (first 2000 examples/task) for speed, so its
 absolute values run slightly high vs. the full-set numbers above; trends and the
 ours-vs-GPT-2 relative gaps are valid (GPT-2 is scored on the same subset).
 
+## Mechanistic capstone: induction-head formation
+
+`benchmarks/induction_sweep.py` reads attention patterns directly from our own
+model (with `use_sdpa=False`, so `MultiHeadAttention` returns probabilities) via
+forward hooks — exact weights, exact GELU, no conversion. For each checkpoint it
+computes the per-head **induction score** (attention to the `p−L+1` offset on
+repeated *random* tokens — random removes any bigram-prior confound) and an
+**ICL score** (loss@50 − loss@500 on real text).
+
+![induction formation](benchmarks/induction_formation.png)
+
+- **A real induction head was found: L11H2**, score ~0.80 (plus weaker heads in
+  the same final layer). A genuine in-context-copying circuit, identified in a
+  model trained from scratch here.
+- **It forms fast and saturates**: max induction score jumps 0.37 → 0.75 between
+  1B and 2B tokens, then plateaus ~0.80.
+- **The sharp phase-change "bump" is not resolved**: ICL is already high (~1.96)
+  at the first checkpoint (step 2000 = 1B tokens) and drifts down after. At
+  GPT-2-small scale the induction phase change happens in roughly the first ~1B
+  tokens — before our earliest checkpoint. Seeing the classic bump would require
+  dense early checkpointing (e.g. every ~50–100 steps over the first 1B tokens).
+  The later ICL decline is a competent-model artifact (early-position loss keeps
+  improving while late-position loss nears its floor), not loss of the capability.
+
 ## Reproduce
 
 ```bash
@@ -99,6 +123,9 @@ python benchmarks/eval_lm_harness.py --gpt2-only
 
 # Capability-vs-tokens sweep over all checkpoints (+ plot)
 python benchmarks/checkpoint_sweep.py --checkpoint-dir /mnt/localssd/gpt2/checkpoints
+
+# Induction-head formation across checkpoints (+ plot)
+python benchmarks/induction_sweep.py --checkpoint-dir /mnt/localssd/gpt2/checkpoints
 ```
 
 ## Sample generations (trained model, top-k=40, temp 0.8)
