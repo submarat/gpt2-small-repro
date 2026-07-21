@@ -53,6 +53,9 @@ def eval_checkpoint(ckpt, out_dir, tag, tasks, limit, device, batch_size):
     hf = convert_to_hf(model.eval(), cfg)
     hf_dir = os.path.join(out_dir, f"hf_{tag}")
     hf.save_pretrained(hf_dir)
+    # lm-eval needs the tokenizer alongside the model, or it tokenizes to empty.
+    from transformers import GPT2TokenizerFast
+    GPT2TokenizerFast.from_pretrained("gpt2").save_pretrained(hf_dir)
     res_dir = os.path.join(out_dir, f"res_{tag}")
     run_lm_eval(f"pretrained={hf_dir},dtype=bfloat16", tasks, res_dir, batch_size, limit, device)
     return parse_results(res_dir)
@@ -160,7 +163,7 @@ def main():
     ap.add_argument("--tasks", default=DEFAULT_TASKS)
     ap.add_argument("--out-dir", default="/mnt/localssd/gpt2/sweep")
     ap.add_argument("--limit", type=int, default=2000, help="examples/task (trend, not final numbers)")
-    ap.add_argument("--batch-size", default="auto")
+    ap.add_argument("--batch-size", default="64")
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--plot-only", action="store_true", help="replot from saved sweep_results.json")
     args = ap.parse_args()
