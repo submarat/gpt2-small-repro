@@ -55,6 +55,35 @@ The headline "reproduced GPT-2" metric, hellaswag, lands within ~2 points of
 GPT-2. The lambada gap (−0.12) is the most notable shortfall and is largely a
 train/eval distribution mismatch.
 
+## Capability emergence over training
+
+`benchmarks/checkpoint_sweep.py` evaluates all 10 checkpoints (every 2000 steps
++ final) on the task set and plots each metric vs. training tokens, with public
+GPT-2 as a dashed reference.
+
+![capability emergence](benchmarks/capability_emergence.png)
+
+Three distinct regimes appear:
+
+1. **Knowledge (sciq, arc_easy) — rise fast, cross *above* GPT-2, plateau.**
+   The FineWeb-Edu advantage is banked early (sciq passes GPT-2 by ~4B tokens).
+2. **Commonsense (hellaswag, piqa) — rise then plateau *just below* GPT-2.**
+   hellaswag is dead flat after ~2B tokens. The plateau means more FineWeb-Edu
+   tokens would **not** close this gap — it's a data-*distribution* ceiling, not
+   a compute/budget limit.
+3. **Distribution-sensitive (lambada, wikitext) — still improving at 10B.**
+   lambada climbs from ~0.001 to 0.19 and wikitext perplexity from 325 to 54.7,
+   both still moving. These are budget/breadth-limited: more (and broader) data
+   would keep helping.
+
+Takeaway: parity with GPT-2 on commonsense was a genuine ceiling for this data,
+knowledge was won outright, and the lambada/wikitext gaps are the fixable
+(under-trained / distribution-mismatched) ones.
+
+Note: the sweep uses `--limit 2000` (first 2000 examples/task) for speed, so its
+absolute values run slightly high vs. the full-set numbers above; trends and the
+ours-vs-GPT-2 relative gaps are valid (GPT-2 is scored on the same subset).
+
 ## Reproduce
 
 ```bash
@@ -67,6 +96,9 @@ python benchmarks/eval_lm_harness.py \
 
 # Public gpt2 baseline only
 python benchmarks/eval_lm_harness.py --gpt2-only
+
+# Capability-vs-tokens sweep over all checkpoints (+ plot)
+python benchmarks/checkpoint_sweep.py --checkpoint-dir /mnt/localssd/gpt2/checkpoints
 ```
 
 ## Sample generations (trained model, top-k=40, temp 0.8)
