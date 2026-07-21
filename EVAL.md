@@ -136,3 +136,20 @@ python benchmarks/induction_sweep.py --checkpoint-dir /mnt/localssd/gpt2/checkpo
 
 Fluent, on-topic English with visible educational-domain tilt; semantically
 shaky as expected at 124M scale.
+
+## Takeaways
+
+- **GPT-2-class, with a data fingerprint.** The model trades blows with public
+  GPT-2 — beating it on knowledge (arc_easy, sciq), matching on commonsense,
+  trailing on distribution-sensitive tasks (lambada, wikitext). The FineWeb-Edu
+  choice reshaped *which* capabilities emerged, not just their average level.
+- **Ceiling vs. budget, decomposed.** Commonsense plateaued below GPT-2 (a data-
+  distribution ceiling — more FineWeb-Edu tokens wouldn't help); knowledge was
+  won outright; lambada/wikitext were still improving at 10B (under-trained /
+  fixable with more, broader data).
+- **Induction forms early.** The induction head (L11H2) saturated within the
+  first ~2B tokens — the same window where commonsense capability plateaued,
+  consistent with induction underlying in-context pattern completion. The sharp
+  phase-change bump happens before the first checkpoint (~1B tokens); resolving
+  it needs dense early checkpointing (~every 50–100 steps over the first 1B
+  tokens), the natural follow-up experiment.
